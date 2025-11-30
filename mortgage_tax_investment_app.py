@@ -1,4 +1,4 @@
-# mortgage_tax_investment_app.py (Full code with CORRECTED NPV Investment Timing and MULTIPLE LUMPS)
+# mortgage_tax_investment_app.py (Full code with MULTIPLE LUMPS and NPV DETAILS)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -238,7 +238,7 @@ def simulate_investment(lump_contributions, monthly_invest=0.0, annual_return_pc
     Monthly compounding used: monthly_return = (1+annual_return)^(1/12)-1
     Return final balance after 'months'.
     """
-    r_month = (1 + annual_return_pct/100.0) ** (1/12.0) - 1.0
+    r_month = (1 + annual_return_pct / 100.0) ** (1/12.0) - 1.0
     balance = 0.0
     
     # Convert list of tuples to a dictionary for faster lookup {month: amount}
@@ -546,6 +546,36 @@ with right_col:
 
         st.write(f"Future Value after {invest_horizon_years} yrs: **{fmt_usd(inv_final_value)}**")
         st.metric("NPV of Investment Future Value (Invest)", fmt_usd(npv_invest), delta_color="off")
+
+
+    # --- NEW DETAIL EXPANDER (as requested) ---
+    with st.expander("📊 See Detailed Financial Breakdown"):
+        r_month = (1 + annual_return / 100.0) ** (1/12.0) - 1.0
+        
+        # Breakdown Column Layout
+        det_col1, det_col2 = st.columns(2)
+        
+        with det_col1:
+            st.markdown("#### Mortgage Prepay Details")
+            st.markdown(f"* **Base Total Interest Paid**: {fmt_usd(total_interest_base)}")
+            st.markdown(f"* **Lump Total Interest Paid**: {fmt_usd(total_interest_lump)}")
+            st.markdown(f"* **Total Interest Saved (Nominal)**: {fmt_usd(interest_saved_by_lump)}")
+            st.markdown(f"* **Lost Annual Tax Savings (1st Yr)**: {fmt_usd(lost_tax_savings_due_to_lump)} (due to reduced interest)")
+            st.markdown(f"* **Mortgage Payoff (Base)**: {months_base} months")
+            st.markdown(f"* **Mortgage Payoff (Lump)**: {months_lump} months")
+
+        with det_col2:
+            st.markdown("#### Investment & Discount Details")
+            st.markdown(f"* **Annual Discount Rate Used (NPV)**: {fmt_pct(annual_return)}")
+            st.markdown(f"* **Monthly Discount Rate Used (NPV)**: {fmt_pct(r_month * 100.0)}")
+            
+            total_invested = total_lump_amount + (monthly_invest * invest_months)
+            st.markdown(f"* **Total Cash Invested (Nominal)**: {fmt_usd(total_invested)}")
+            
+            # Show the individual lumps for context
+            st.markdown("* **Lump Contributions**:")
+            for month, amount in st.session_state.lump_list:
+                 st.caption(f"  - Month {month}: {fmt_usd(amount)}")
 
 
     # Recommendation
