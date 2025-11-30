@@ -1,19 +1,10 @@
-# mortgage_app.py
+# mortgage_tax_investment_app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
 from io import BytesIO
 import math
-import altair as alt # Added altair import here
-
-# ---------------------------
-# Reset session state so every new visitor gets fresh fields
-# ---------------------------
-# Note: Keeping this commented out as per previous recommendation for better user experience
-# for k in list(st.session_state.keys()):
-#     del st.session_state[k]
-
-st.set_page_config(page_title="Mortgage vs Invest Planner (2025)", layout="wide", page_icon="🏦")
+import altair as alt
 
 # ---------------------------
 # Formatting helpers
@@ -49,7 +40,6 @@ STANDARD_DEDUCTION_2025 = {
 
 # ---------------------------
 # 2025 federal tax brackets (cutpoints)
-# Each tuple: (lower_inclusive, upper_exclusive, rate)
 # ---------------------------
 FEDERAL_BRACKETS_2025 = {
     "Single": [
@@ -290,23 +280,13 @@ def compute_annual_tax_savings(first_year_interest, income, filing_status, num_d
     return total, federal_savings, state_savings
 
 # ---------------------------
-# NEW: NPV CALCULATION FUNCTION
+# NPV CALCULATION FUNCTION (FIXED)
 # ---------------------------
 def calculate_npv(df_base, df_scenario, lump_amount, monthly_invest, annual_r_invest, invest_horizon_months, interest_saved_total, tax_savings_annual_base, tax_savings_annual_scenario, months_lump):
     """
     Compares the NPV of the Lump Payment (Prepay) vs. Lump Investment (Invest) option.
     Discount Rate (r) used is the monthly investment return rate.
 
-    Option A (Prepay): Lump is paid, resulting in future interest savings.
-    NPV is the Present Value of the stream of Future Savings (Interest Saved + Tax Benefit Difference)
-    
-    Option B (Invest): Lump is invested, resulting in a Future Value.
-    NPV is the Present Value of the Future Value + PV of monthly difference.
-    
-    We simplify the comparison to the **difference in outcome** (Investment FV vs Interest Saved). 
-    The best comparison is the **difference in Wealth at End of Investment Horizon**. 
-    
-    However, for the specific request of NPV comparison:
     NPV_A: Present value of total interest saved (discounted at investment rate)
     NPV_B: Present value of investment future value
     """
@@ -315,15 +295,20 @@ def calculate_npv(df_base, df_scenario, lump_amount, monthly_invest, annual_r_in
     r_month = (1 + annual_r_invest / 100.0) ** (1/12.0) - 1.0
     
     # 1. Option A: Prepay Mortgage (Benefit = Interest Saved)
-    # The monthly interest saved is the difference between df_base and df_scenario monthly payments.
-    
-    # Pad shorter dataframe to max length with zeroes for balance/interest
     max_m = max(len(df_base), len(df_scenario))
-    df_base_padded = df_base.reindex(range(1, max_m + 1), fill_value=0.0).reset_index(names=['Month']).drop(columns=['index'])
-    df_scenario_padded = df_scenario.reindex(range(1, max_m + 1), fill_value=0.0).reset_index(names=['Month']).drop(columns=['index'])
+    
+    # FIX: Set 'Month' as index first, then reindex and reset to avoid duplicate column error.
+    
+    # Prepare base DataFrame
+    df_base_indexed = df_base.set_index('Month')
+    # Reindex to max length and fill N/A with 0.0, then reset index to bring 'Month' back as a column
+    df_base_padded = df_base_indexed.reindex(range(1, max_m + 1), fill_value=0.0).reset_index(names=['Month'])
+    
+    # Prepare scenario DataFrame
+    df_scenario_indexed = df_scenario.set_index('Month')
+    df_scenario_padded = df_scenario_indexed.reindex(range(1, max_m + 1), fill_value=0.0).reset_index(names=['Month'])
     
     # Calculate the net interest saved in each month (Base Interest - Scenario Interest)
-    # Note: We must compare interest over the maximum term (usually base term)
     interest_saved_monthly = df_base_padded['Interest'] - df_scenario_padded['Interest']
     
     # Calculate NPV of the Interest Savings stream
@@ -333,20 +318,10 @@ def calculate_npv(df_base, df_scenario, lump_amount, monthly_invest, annual_r_in
     ])
     
     # 2. Option B: Invest Lump Sum (Cost = Lump Amount, Benefit = Investment Return)
-    # The NPV of the future value of the lump sum investment
     inv_final_value = simulate_investment(lump_amount, monthly_invest=monthly_invest, annual_return_pct=annual_r_invest, months=invest_horizon_months)
-    npv_invest = inv_final_value / ((1 + r_month) ** invest_horizon_months) - lump_amount 
-    # (The FV part is usually included in the cash flow, but here we compare the "outcome")
-    # A cleaner approach is to use the difference in the cash flows, but since the interest saved (NPV_A) is already positive, 
-    # we'll compare the PV of the interest saved vs the PV of the Investment Gain (FV - Capital).
     
-    # For a fair comparison against NPV_A (which is the PV of savings), 
-    # we calculate the PV of the *gain* from investing: FV_invested - lump_amount - total_monthly_contributions
-    total_monthly_contributions = monthly_invest * invest_horizon_months
-    inv_gain = inv_final_value - lump_amount - total_monthly_contributions
-    
-    # Calculate PV of the Investment Gain/Return
-    # For a simple heuristic: use the PV of the entire future value
+    # Calculate PV of the Investment Future Value
+    # This PV represents the value of the investment choice today.
     npv_invest_value = inv_final_value / ((1 + r_month) ** invest_horizon_months)
 
     # Simplified NPV Comparison: PV of Interest Saved vs. PV of Investment FV
@@ -355,6 +330,7 @@ def calculate_npv(df_base, df_scenario, lump_amount, monthly_invest, annual_r_in
 # ---------------------------
 # UI: Left columns split into Mortgage / Tax / Investment inputs
 # ---------------------------
+st.set_page_config(page_title="Mortgage vs Invest Planner (2025)", layout="wide", page_icon="🏦")
 left_col, right_col = st.columns([1, 2])
 
 with left_col:
@@ -392,12 +368,11 @@ with right_col:
     df_base = amortization_schedule(remaining_loan, annual_interest, months, extra_monthly=0.0)
     # With extra monthly payments
     df_extra = amortization_schedule(remaining_loan, annual_interest, months, extra_monthly=extra_monthly if extra_monthly>0 else 0.0)
-    # Lump-sum schedule: keep EMI constant, apply lump at lump_month, allow recurring extra_monthly after lump (we'll pass extra_monthly)
+    # Lump-sum schedule
     df_lump = apply_lump_and_resimulate(df_base, remaining_loan, annual_interest, months, lump_amount, lump_month, extra_monthly=extra_monthly if extra_monthly>0 else 0.0)
 
     # Totals
     total_interest_base = df_base["Interest"].sum() if not df_base.empty else 0.0
-    total_interest_extra = df_extra["Interest"].sum() if not df_extra.empty else 0.0
     total_interest_lump = df_lump["Interest"].sum() if not df_lump.empty else 0.0
 
     # First-year interest (sum months 1..12)
@@ -405,7 +380,6 @@ with right_col:
     first_year_interest_lump = df_lump.loc[df_lump["Month"] <= 12, "Interest"].sum() if not df_lump.empty else 0.0
 
     months_base = len(df_base)
-    months_extra = len(df_extra)
     months_lump = len(df_lump)
 
     months_saved_by_lump = max(0, months_base - months_lump)
@@ -438,7 +412,7 @@ with right_col:
     )
 
 
-    # Also compute effective APR after tax for original vs lump (first-year interest minus tax savings / principal)
+    # Also compute effective APR after tax
     effective_first_year_interest_base = first_year_interest_base - tax_savings_base
     effective_rate_base_pct = (effective_first_year_interest_base / remaining_loan) * 100.0 if remaining_loan > 0 else 0.0
 
@@ -470,7 +444,7 @@ with right_col:
     st.markdown("---")
 
     # ---------------------------
-    # NEW: Investment vs Lump NPV comparison block
+    # Investment vs Lump NPV comparison block
     # ---------------------------
     st.subheader("💰 Lump-sum Prepay vs Invest — Net Present Value (NPV) Comparison")
     st.caption(f"NPV is calculated by discounting future cash flows back to the present using the Expected Annual Return ({fmt_pct(annual_return)}). Higher NPV is better.")
@@ -485,8 +459,8 @@ with right_col:
 
     with colB:
         st.markdown(f"**Option B: Invest for {invest_horizon_years} years**")
-        st.write(f"Lump sum + monthly invest: **{fmt_usd(lump_amount + monthly_invest * invest_months)}** total capital")
-        st.write(f"Future Value after {invest_horizon_years} yrs: **{fmt_usd(simulate_investment(lump_amount, monthly_invest=monthly_invest, annual_return_pct=annual_return, months=invest_months))}**")
+        inv_final_value = simulate_investment(lump_amount, monthly_invest=monthly_invest, annual_return_pct=annual_return, months=invest_months)
+        st.write(f"Future Value after {invest_horizon_years} yrs: **{fmt_usd(inv_final_value)}**")
         st.metric("NPV of Investment Future Value (Invest)", fmt_usd(npv_invest), delta_color="off")
 
 
@@ -505,16 +479,14 @@ with right_col:
     st.markdown("---")
 
     # ---------------------------
-    # Charts: Balances and Interest comparison (includes new cumulative interest chart)
+    # Charts: Balances and Interest comparison
     # ---------------------------
     try:
-        # --- Balance Comparison Chart (Existing) ---
-        st.subheader("Balance comparison")
-
         max_m = max(len(df_base), len(df_extra), len(df_lump))
         months_idx = np.arange(1, max_m + 1)
         df_plot = pd.DataFrame({"Month": months_idx})
 
+        # Balance Data Preparation
         if not df_base.empty:
             df_plot = df_plot.merge(df_base[["Month","Balance"]].rename(columns={"Balance":"Balance_Base"}), on="Month", how="left")
         else:
@@ -534,6 +506,8 @@ with right_col:
         df_plot["Balance_Extra"].ffill(inplace=True); df_plot["Balance_Extra"].fillna(0,inplace=True)
         df_plot["Balance_Lump"].ffill(inplace=True); df_plot["Balance_Lump"].fillna(0,inplace=True)
 
+        # 1. Balance Comparison Chart
+        st.subheader("Outstanding Balance Over Time")
         melt = df_plot.melt("Month", value_vars=["Balance_Base","Balance_Extra","Balance_Lump"], var_name="Scenario", value_name="Balance")
         melt["Scenario"] = melt["Scenario"].map({"Balance_Base":"Base","Balance_Extra":"With Extra","Balance_Lump":"With Lump"})
 
@@ -541,28 +515,22 @@ with right_col:
             x="Month",
             y=alt.Y("Balance", title="Outstanding Balance ($)"),
             color="Scenario"
-        ).properties(height=420, title="Outstanding Balance Over Time")
+        ).properties(height=420)
         st.altair_chart(chart_balance, use_container_width=True)
         
-        # 
 
-        # --- Cumulative Interest Chart (New) ---
+        # 2. Cumulative Interest Chart
         st.subheader("Cumulative Interest Paid")
 
-        if not df_base.empty:
-            df_plot["Interest_Base"] = df_base["Interest"].cumsum()
-        else:
-            df_plot["Interest_Base"] = 0.0
-
-        if not df_extra.empty:
-            df_plot["Interest_Extra"] = df_extra["Interest"].cumsum()
-        else:
-            df_plot["Interest_Extra"] = 0.0
-            
-        if not df_lump.empty:
-            df_plot["Interest_Lump"] = df_lump["Interest"].cumsum()
-        else:
-            df_plot["Interest_Lump"] = 0.0
+        # Interest Data Preparation
+        df_plot["Interest_Base"] = df_base["Interest"].cumsum() if not df_base.empty else 0.0
+        df_plot["Interest_Extra"] = df_extra["Interest"].cumsum() if not df_extra.empty else 0.0
+        df_plot["Interest_Lump"] = df_lump["Interest"].cumsum() if not df_lump.empty else 0.0
+        
+        # Fill NA values for shorter amortization schedules after payoff
+        df_plot["Interest_Base"].ffill(inplace=True); df_plot["Interest_Base"].fillna(0,inplace=True)
+        df_plot["Interest_Extra"].ffill(inplace=True); df_plot["Interest_Extra"].fillna(0,inplace=True)
+        df_plot["Interest_Lump"].ffill(inplace=True); df_plot["Interest_Lump"].fillna(0,inplace=True)
         
         melt_interest = df_plot.melt("Month", value_vars=["Interest_Base","Interest_Extra","Interest_Lump"], var_name="Scenario", value_name="Cumulative_Interest")
         melt_interest["Scenario"] = melt_interest["Scenario"].map({"Interest_Base":"Base","Interest_Extra":"With Extra","Interest_Lump":"With Lump"})
@@ -571,13 +539,12 @@ with right_col:
             x="Month",
             y=alt.Y("Cumulative_Interest", title="Cumulative Interest Paid ($)"),
             color="Scenario"
-        ).properties(height=420, title="Cumulative Interest Paid Over Time")
+        ).properties(height=420)
         st.altair_chart(chart_interest, use_container_width=True)
         
-        # 
 
     except Exception:
-        st.info("Install the required libraries (pandas, streamlit, altair, numpy) to see charts.")
+        st.info("Ensure all dependencies (pandas, streamlit, numpy, altair, openpyxl) are installed to render charts.")
 
     st.markdown("---")
 
@@ -648,5 +615,3 @@ with right_col:
     st.write(f"Estimated annual tax savings (with lump): **{fmt_usd(tax_savings_lump)}**")
     st.write(f"Estimated lost tax savings by prepaying: **{fmt_usd(lost_tax_savings_due_to_lump)}**")
     st.caption("Notes: Child tax credit modeled as $2,000 per dependent (simplified). SALT cap applied. For precise tax planning consult a tax professional.")
-
-# End of file
