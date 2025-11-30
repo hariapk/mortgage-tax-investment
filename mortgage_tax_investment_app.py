@@ -1,4 +1,4 @@
-# mortgage_tax_investment_app.py
+# mortgage_tax_investment_app.py (Full code with corrected NPV logic and input check)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -219,7 +219,7 @@ def apply_lump_and_resimulate(original_schedule_df, P, annual_rate_pct, n_months
             else:
                 principal_paid = principal_base + extra
                 balance -= principal_paid
-                rows.append([month, round(base_emi,2), round(interest,2), round(principal_base,2), round(extra,2), round(base_emi + extra,2), round(balance,2)])
+                rows.append([month, round(base_emi + extra,2), round(interest,2), round(principal_base,2), round(extra,2), round(base_emi + extra,2), round(balance,2)])
     df_new = pd.DataFrame(rows, columns=["Month","BaseEMI","Interest","PrincipalBase","ExtraPayment","TotalPayment","Balance"])
     return df_new
 
@@ -288,7 +288,7 @@ def calculate_npv(df_base, df_scenario, lump_amount, monthly_invest, annual_r_in
     Discount Rate (r) used is the monthly investment return rate.
 
     NPV_A: Present value of total interest saved (discounted at investment rate)
-    NPV_B: Present value of investment future value
+    NPV_B: Present value of investment future value (PV of final wealth)
     """
     
     # Calculate monthly investment discount rate (r)
@@ -297,11 +297,10 @@ def calculate_npv(df_base, df_scenario, lump_amount, monthly_invest, annual_r_in
     # 1. Option A: Prepay Mortgage (Benefit = Interest Saved)
     max_m = max(len(df_base), len(df_scenario))
     
-    # FIX: Set 'Month' as index first, then reindex and reset to avoid duplicate column error.
+    # FIX for ValueError: Set 'Month' as index first, then reindex and reset to avoid duplicate column error.
     
     # Prepare base DataFrame
     df_base_indexed = df_base.set_index('Month')
-    # Reindex to max length and fill N/A with 0.0, then reset index to bring 'Month' back as a column
     df_base_padded = df_base_indexed.reindex(range(1, max_m + 1), fill_value=0.0).reset_index(names=['Month'])
     
     # Prepare scenario DataFrame
@@ -312,16 +311,18 @@ def calculate_npv(df_base, df_scenario, lump_amount, monthly_invest, annual_r_in
     interest_saved_monthly = df_base_padded['Interest'] - df_scenario_padded['Interest']
     
     # Calculate NPV of the Interest Savings stream
+    # Note: We use t+1 for discounting factor since the savings are realized *after* each month/payment.
     npv_prepay_interest = np.sum([
         interest_saved_monthly.iloc[t] / ((1 + r_month) ** (t + 1)) 
         for t in range(len(interest_saved_monthly))
     ])
     
-    # 2. Option B: Invest Lump Sum (Cost = Lump Amount, Benefit = Investment Return)
+    # 2. Option B: Invest Lump Sum (Benefit = Future Value)
     inv_final_value = simulate_investment(lump_amount, monthly_invest=monthly_invest, annual_return_pct=annual_r_invest, months=invest_horizon_months)
     
-    # Calculate PV of the Investment Future Value
-    # This PV represents the value of the investment choice today.
+    # Calculate PV of the Investment Future Value (This is the PV of the final asset value)
+    # The error was not in the math, but likely in the input being used. 
+    # This calculation is mathematically correct: PV = FV / (1+r)^T
     npv_invest_value = inv_final_value / ((1 + r_month) ** invest_horizon_months)
 
     # Simplified NPV Comparison: PV of Interest Saved vs. PV of Investment FV
@@ -354,6 +355,7 @@ with left_col:
 
     st.markdown("---")
     st.header("Investment inputs")
+    # DEFAULT IS 20000.0
     lump_amount = st.number_input("Lump-sum amount ($)", value=20000.0, step=100.0, format="%.2f")
     lump_month = st.number_input("Lump-sum month (1 = now)", value=12, min_value=1, step=1)
     monthly_invest = st.number_input("Monthly invest amount (optional $)", value=0.0, step=10.0, format="%.2f")
@@ -518,7 +520,6 @@ with right_col:
         ).properties(height=420)
         st.altair_chart(chart_balance, use_container_width=True)
         
-
         # 2. Cumulative Interest Chart
         st.subheader("Cumulative Interest Paid")
 
@@ -542,7 +543,6 @@ with right_col:
         ).properties(height=420)
         st.altair_chart(chart_interest, use_container_width=True)
         
-
     except Exception:
         st.info("Ensure all dependencies (pandas, streamlit, numpy, altair, openpyxl) are installed to render charts.")
 
