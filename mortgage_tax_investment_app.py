@@ -1,18 +1,21 @@
-# mortgage_tax_investment_app.py (Full code with Dynamic Mortgage Interest Cap)
+# mortgage_app_v2.py - Integrated with Advanced ChatGPT Logic
 import streamlit as st
 import pandas as pd
 import numpy as np
 from io import BytesIO
-import math
-import altair as alt
-
-# Initialize session state for dynamic lump sums
-if 'lump_list' not in st.session_state:
-    # Default to a single lump sum setting (e.g., $20,000 on month 12)
-    st.session_state.lump_list = [(12, 20000.0)] 
 
 # ---------------------------
-# Formatting helpers
+# Reset session state so every new visitor gets fresh fields
+# ---------------------------
+if "initialized" not in st.session_state:
+    st.session_state.clear()
+    st.session_state["lump_events"] = []  # list of {"amount": float, "month": int}
+    st.session_state["initialized"] = True
+
+st.set_page_config(page_title="Mortgage vs Invest Planner (2025) — Advanced PV/Tax Model", layout="wide", page_icon="🏦")
+
+# ---------------------------
+# Helpers / formatters / io
 # ---------------------------
 def fmt_usd(x):
     try:
@@ -33,7 +36,12 @@ def to_excel_bytes(df, sheet_name="Sheet1"):
     return out.getvalue()
 
 # ---------------------------
-# 2025 standard deductions (final)
+# Constants: MID cap (loan orig >= Dec 16, 2017) -> $750,000 for joint filers
+# ---------------------------
+MID_CAP_DEFAULT = 750000.0
+
+# ---------------------------
+# 2025 standard deductions (from ChatGPT source)
 # ---------------------------
 STANDARD_DEDUCTION_2025 = {
     "Single": 15750.0,
@@ -44,63 +52,44 @@ STANDARD_DEDUCTION_2025 = {
 }
 
 # ---------------------------
-# 2025 federal tax brackets (cutpoints)
+# 2025 federal tax brackets (cutpoints from ChatGPT source)
 # ---------------------------
 FEDERAL_BRACKETS_2025 = {
     "Single": [
-        (0, 11925, 0.10),
-        (11925, 48475, 0.12),
-        (48475, 103350, 0.22),
-        (103350, 197300, 0.24),
-        (197300, 250525, 0.32),
-        (250525, 626350, 0.35),
+        (0, 11925, 0.10), (11925, 48475, 0.12), (48475, 103350, 0.22),
+        (103350, 197300, 0.24), (197300, 250525, 0.32), (250525, 626350, 0.35),
         (626350, float("inf"), 0.37),
     ],
     "Married Filing Jointly": [
-        (0, 23850, 0.10),
-        (23850, 96950, 0.12),
-        (96950, 206700, 0.22),
-        (206700, 394600, 0.24),
-        (394600, 501050, 0.32),
-        (501050, 751600, 0.35),
+        (0, 23850, 0.10), (23850, 96950, 0.12), (96950, 206700, 0.22),
+        (206700, 394600, 0.24), (394600, 501050, 0.32), (501050, 751600, 0.35),
         (751600, float("inf"), 0.37),
     ],
     "Married Filing Separately": [
-        (0, 11925, 0.10),
-        (11925, 48475, 0.12),
-        (48475, 103350, 0.22),
-        (103350, 197300, 0.24),
-        (197300, 250525, 0.32),
-        (250525, 626350, 0.35),
+        (0, 11925, 0.10), (11925, 48475, 0.12), (48475, 103350, 0.22),
+        (103350, 197300, 0.24), (197300, 250525, 0.32), (250525, 626350, 0.35),
         (626350, float("inf"), 0.37),
     ],
     "Head of Household": [
-        (0, 17000, 0.10),
-        (17000, 64850, 0.12),
-        (64850, 103350, 0.22),
-        (103350, 197300, 0.24),
-        (197300, 250500, 0.32),
-        (250500, 626350, 0.35),
+        (0, 17000, 0.10), (17000, 64850, 0.12), (64850, 103350, 0.22),
+        (103350, 197300, 0.24), (197300, 250500, 0.32), (250500, 626350, 0.35),
         (626350, float("inf"), 0.37),
     ],
     "Surviving Spouses": [
-        (0, 23850, 0.10),
-        (23850, 96950, 0.12),
-        (96950, 206700, 0.22),
-        (206700, 394600, 0.24),
-        (394600, 501050, 0.32),
-        (501050, 751600, 0.35),
+        (0, 23850, 0.10), (23850, 96950, 0.12), (96950, 206700, 0.22),
+        (206700, 394600, 0.24), (394600, 501050, 0.32), (501050, 751600, 0.35),
         (751600, float("inf"), 0.37),
     ],
 }
 
 # ---------------------------
-# Tax engine: progressive federal tax
+# Tax engine: progressive federal tax (from ChatGPT source)
 # ---------------------------
 def compute_progressive_tax(taxable_income, filing_status):
     if taxable_income <= 0:
         return 0.0
     tax = 0.0
+    # Use the progressive tax brackets to calculate tax owed
     for low, high, rate in FEDERAL_BRACKETS_2025[filing_status]:
         if taxable_income > low:
             taxed = min(taxable_income, high) - low
@@ -111,22 +100,16 @@ def compute_progressive_tax(taxable_income, filing_status):
     return tax
 
 # ---------------------------
-# Mortgage math & amortization
+# Mortgage math & amortization (all functions from ChatGPT source)
 # ---------------------------
 def compute_emi(P, annual_rate_pct, n_months):
     r = annual_rate_pct / 100.0 / 12.0
-    if n_months <= 0:
-        return 0.0
-    if r == 0:
-        return P / n_months
+    if n_months <= 0: return 0.0
+    if r == 0: return P / n_months
     powv = (1 + r) ** n_months
     return P * r * powv / (powv - 1)
 
 def amortization_schedule(P, annual_rate_pct, n_months, extra_monthly=0.0):
-    """
-    Builds an amortization schedule until payoff.
-    Columns: Month, BaseEMI, Interest, PrincipalBase, ExtraPayment, TotalPayment, Balance
-    """
     monthly_r = annual_rate_pct / 100.0 / 12.0
     base_emi = compute_emi(P, annual_rate_pct, n_months)
     balance = float(P)
@@ -137,12 +120,11 @@ def amortization_schedule(P, annual_rate_pct, n_months, extra_monthly=0.0):
         month += 1
         interest = balance * monthly_r
         principal_base = base_emi - interest
-        if principal_base < 0:
-            principal_base = 0.0
+        if principal_base < 0: principal_base = 0.0
         extra = min(extra_monthly, max(0.0, balance - principal_base))
-        payment = base_emi + extra
+        
+        # Check for final payment
         if principal_base + extra >= balance - 1e-9:
-            # final payment
             principal_paid = balance
             payment = interest + principal_paid
             balance = 0.0
@@ -151,38 +133,30 @@ def amortization_schedule(P, annual_rate_pct, n_months, extra_monthly=0.0):
         else:
             principal_paid = principal_base + extra
             balance -= principal_paid
-            rows.append([month, round(base_emi,2), round(interest,2), round(principal_base,2), round(extra,2), round(payment,2), round(balance,2)])
-    df = pd.DataFrame(rows, columns=["Month","BaseEMI","Interest","PrincipalBase","ExtraPayment","TotalPayment","Balance"])
-    return df
+            rows.append([month, round(base_emi,2), round(interest,2), round(principal_base,2), round(extra,2), round(base_emi + extra,2), round(balance,2)])
+    return pd.DataFrame(rows, columns=["Month","BaseEMI","Interest","PrincipalBase","ExtraPayment","TotalPayment","Balance"])
 
-# ---------------------------
-# Lump-sum simulation: keep EMI constant, apply lump at month t, recompute schedule
-# ---------------------------
-def apply_lump_and_resimulate(original_schedule_df, P, annual_rate_pct, n_months, lump_amount, lump_month, extra_monthly=0.0):
-    """
-    original_schedule_df: schedule without lump (so we can use months)
-    P, annual_rate_pct, n_months: original loan parameters
-    lump_amount: amount applied to principal at lump_month
-    lump_month: integer >=1 (1 = immediate today/month1)
-    Returns: new_schedule_df, months_new
-    """
-    # Simulate month-by-month: build schedule up to lump_month, then subtract lump from balance and continue amortization
+# Apply multiple lump sums (apply AFTER that month's EMI) and re-simulate
+def apply_multiple_lumps_and_resimulate(P, annual_rate_pct, n_months, lumps, extra_monthly=0.0):
+    if not lumps:
+        return amortization_schedule(P, annual_rate_pct, n_months, extra_monthly=extra_monthly)
+    lumps_sorted = sorted(lumps, key=lambda x: int(x["month"]))
     monthly_r = annual_rate_pct / 100.0 / 12.0
     base_emi = compute_emi(P, annual_rate_pct, n_months)
     balance = float(P)
     month = 0
     rows = []
     cap = max(n_months * 10, 1200)
+    lump_idx = 0
     while balance > 0.005 and month < cap:
         month += 1
         interest = balance * monthly_r
         principal_base = base_emi - interest
-        if principal_base < 0:
-            principal_base = 0.0
-        extra = 0.0 # we treat extra_monthly separately only after lump if provided
-        # normal monthly payment before lump:
+        if principal_base < 0: principal_base = 0.0
+        extra = 0.0
+        
+        # Regular payment calculation and application
         if principal_base >= balance:
-            # final payment without lump
             principal_paid = balance
             payment = interest + principal_paid
             balance = 0.0
@@ -190,30 +164,27 @@ def apply_lump_and_resimulate(original_schedule_df, P, annual_rate_pct, n_months
             break
         else:
             payment = base_emi
-            balance = balance - principal_base
+            balance -= principal_base
             rows.append([month, round(base_emi,2), round(interest,2), round(principal_base,2), round(extra,2), round(payment,2), round(balance,2)])
-        # If this is the lump month, apply lump immediately after that month's scheduled payment
-        if month == lump_month:
-            applied = min(lump_amount, balance)
-            balance = balance - applied
-            # if applying lump pays off the loan immediately:
-            if balance <= 0.005:
-                # finalizing: create a final row capturing this (we'll show an extra row marking post-lump payoff)
-                month += 1
-                # no interest accrues for the next month
-                rows.append([month, 0.0, 0.0, round(0.0,2), round(0.0,2), round(0.0,2), round(0.0,2)])
+        
+        # Apply lumps scheduled for this month AFTER the regular payment
+        while lump_idx < len(lumps_sorted) and int(lumps_sorted[lump_idx]["month"]) == month:
+            applied = min(float(lumps_sorted[lump_idx]["amount"]), balance)
+            balance -= applied
+            lump_idx += 1
+            if balance <= 0.005: # Loan paid off by lump
+                # Add one final entry to show zero balance
+                rows.append([month, 0.0, 0.0, round(0.0,2), round(0.0,2), round(0.0,2), round(balance,2)])
                 break
-            # after applying lump, continue the loop which will create further months until payoff using same base_emi but reduced balance
-    # If loan not paid yet, continue with same base_emi and include extra_monthly if provided (we assume extra recurring applies after lump, if user wants that)
-    # But we built rows only up to the lump month and possibly not beyond; rebuild final schedule starting from current balance and month count
+        if balance <= 0.005: break
+
+    # Continue amortization with extra_monthly if still outstanding (after lumps)
     if balance > 0.005 and month < cap:
-        # continue amortization from current balance, but allow recurring extra_monthly thereafter
         while balance > 0.005 and month < cap:
             month += 1
             interest = balance * monthly_r
             principal_base = base_emi - interest
-            if principal_base < 0:
-                principal_base = 0.0
+            if principal_base < 0: principal_base = 0.0
             extra = min(extra_monthly, max(0.0, balance - principal_base)) if extra_monthly > 0 else 0.0
             if principal_base + extra >= balance - 1e-9:
                 principal_paid = balance
@@ -224,536 +195,287 @@ def apply_lump_and_resimulate(original_schedule_df, P, annual_rate_pct, n_months
             else:
                 principal_paid = principal_base + extra
                 balance -= principal_paid
-                rows.append([month, round(base_emi + extra,2), round(interest,2), round(principal_base,2), round(extra,2), round(base_emi + extra,2), round(balance,2)])
-    df_new = pd.DataFrame(rows, columns=["Month","BaseEMI","Interest","PrincipalBase","ExtraPayment","TotalPayment","Balance"])
-    return df_new
+                rows.append([month, round(base_emi,2), round(interest,2), round(principal_base,2), round(extra,2), round(base_emi + extra,2), round(balance,2)])
+    return pd.DataFrame(rows, columns=["Month","BaseEMI","Interest","PrincipalBase","ExtraPayment","TotalPayment","Balance"])
 
 # ---------------------------
-# Investment simulation (monthly compounding) - REVISED FOR MULTIPLE LUMPS
+# Investment simulation: multiple lumps + monthly invest (from ChatGPT source)
 # ---------------------------
-def simulate_investment(lump_contributions, monthly_invest=0.0, annual_return_pct=10.0, months=12):
-    """
-    Simulate starting investment (zero unless a lump is at month 1), plus monthly_invest deposits at the END of each month.
-    lump_contributions is a list of tuples: [(month, amount), ...].
-    Monthly compounding used: monthly_return = (1+annual_return)^(1/12)-1
-    Return final balance after 'months'.
-    """
-    r_month = (1 + annual_return_pct / 100.0) ** (1/12.0) - 1.0
+def simulate_investment_multiple_lumps(lump_events, monthly_invest, annual_return_pct, invest_months):
+    r_month = (1 + annual_return_pct/100.0) ** (1/12.0) - 1.0
     balance = 0.0
-    
-    # Convert list of tuples to a dictionary for faster lookup {month: amount}
-    lump_dict = dict(lump_contributions)
-    
-    # Simulation runs from the start of month 1 up to the end of month 'months'
-    for m in range(1, months + 1):
-        # 1. Apply any lump sum (at the START of the month, immediately before compounding)
-        if m in lump_dict:
-            balance += lump_dict[m]
-            
-        # 2. Grow existing balance by compounding
-        balance = balance * (1 + r_month)
+    # map lumps by month for quick add
+    lumps_by_month = {}
+    for e in lump_events:
+        m = int(e["month"])
+        lumps_by_month.setdefault(m, 0.0)
+        lumps_by_month[m] += float(e["amount"])
         
-        # 3. Add monthly contribution (at the END of the month)
-        if monthly_invest > 0:
+    start_monthly = min([int(e["month"]) for e in lump_events]) if lump_events else 1
+    
+    for m in range(1, invest_months + 1):
+        balance = balance * (1 + r_month)
+        if m in lumps_by_month and m <= invest_months:
+            balance += lumps_by_month[m]
+        # Monthly invest starts the same month as the first lump (or month 1 if no lumps)
+        if monthly_invest > 0 and m >= start_monthly:
             balance += monthly_invest
-            
     return balance
 
 # ---------------------------
-# Tax savings calculator (uses first-year interest as deduction proxy) - UPDATED FOR DYNAMIC CAP
+# Tax savings calculator (based on ChatGPT source, simplified state tax logic removed)
 # ---------------------------
-def compute_annual_tax_savings(first_year_interest, income, filing_status, num_dependents, include_state, state_tax_rate, annual_property_tax, remaining_loan_principal, salt_cap=10000.0, mortgage_cap=750000.0):
-    """
-    Returns:
-      annual_tax_savings (float),
-      federal_savings,
-      state_savings,
-      interest_deductible (capped)
-    
-    Includes TCJA (post-2017) mortgage interest deduction cap logic.
-    """
-    
-    # 1. Apply Mortgage Interest Deduction Cap
-    if remaining_loan_principal > 0:
-        # Ratio of the cap to the current loan principal, limited to 1.0
-        cap_ratio = min(1.0, mortgage_cap / remaining_loan_principal)
-        interest_deductible = first_year_interest * cap_ratio
-    else:
-        interest_deductible = 0.0
-
+def compute_annual_tax_savings(first_year_interest, income, filing_status, num_dependents, annual_property_tax, salt_cap=10000.0):
     std = STANDARD_DEDUCTION_2025.get(filing_status, 0.0)
     salt = min(annual_property_tax, salt_cap)
+    itemized = first_year_interest + salt
     
-    # 2. Calculate Itemized Deduction: Capped Interest + Capped SALT
-    itemized = interest_deductible + salt
-    
-    # taxable incomes
     taxable_standard = max(0.0, income - std)
     taxable_itemized = max(0.0, income - itemized)
     
-    # federal taxes
     tax_standard = compute_progressive_tax(taxable_standard, filing_status)
     tax_itemized = compute_progressive_tax(taxable_itemized, filing_status)
     
-    # child credit
     CHILD_TAX_CREDIT = 2000.0
     credit = num_dependents * CHILD_TAX_CREDIT
+    
+    # Tax liability after standard deduction and credit
     tax_after_standard = max(0.0, tax_standard - credit)
+    # Tax liability after itemized deduction and credit
     tax_after_itemized = max(0.0, tax_itemized - credit)
+    
     federal_savings = tax_after_standard - tax_after_itemized
     
-    # state approximate: assume state tax savings from deduction is: (itemized - std) * state_tax_rate
-    state_savings = 0.0
-    if include_state:
-        # State deduction benefit is realized if itemized > standard
-        state_deduction_benefit = max(0.0, itemized - std)
-        state_savings = state_deduction_benefit * state_tax_rate
-    
-    total = max(0.0, federal_savings + state_savings)
-    return total, federal_savings, state_savings, interest_deductible
+    # Total tax savings is the reduction in tax liability by itemizing
+    total = max(0.0, federal_savings) 
+    return total
+
+# Compute average starting balance for MID cap logic (from ChatGPT source)
+def compute_first_year_avg_start_balance(df_sched, starting_principal):
+    """Approximate average starting balance for months 1..12."""
+    starts = []
+    for m in range(1, 13):
+        if m == 1:
+            starts.append(starting_principal)
+        else:
+            prev = df_sched.loc[df_sched["Month"] == (m - 1)]
+            if not prev.empty:
+                # Start of month m is end balance of month m-1
+                starts.append(float(prev["Balance"].values[0]))
+            else:
+                starts.append(0.0)
+    arr = np.array(starts)
+    arr = arr[arr > 0]
+    if arr.size == 0:
+        return 0.0
+    return float(arr.mean())
+
 
 # ---------------------------
-# NPV CALCULATION FUNCTION 
+# UI - Layout and Inputs (Adapted from ChatGPT source)
 # ---------------------------
-def calculate_npv(df_base, df_scenario, lump_contributions, monthly_invest, annual_r_invest, invest_horizon_months, interest_saved_total, tax_savings_annual_base, tax_savings_annual_scenario):
-    """
-    NPV_A: Present value of total interest saved (discounted at investment rate)
-    NPV_B: Present value of investment future value (PV of final wealth)
-    """
-    
-    # Calculate monthly investment discount rate (r)
-    r_month = (1 + annual_r_invest / 100.0) ** (1/12.0) - 1.0
-    
-    # 1. Option A: Prepay Mortgage (Benefit = Interest Saved)
-    max_m = max(len(df_base), len(df_scenario))
-    
-    # Prepare base DataFrame
-    df_base_indexed = df_base.set_index('Month')
-    df_base_padded = df_base_indexed.reindex(range(1, max_m + 1), fill_value=0.0).reset_index(names=['Month'])
-    
-    # Prepare scenario DataFrame
-    df_scenario_indexed = df_scenario.set_index('Month')
-    df_scenario_padded = df_scenario_indexed.reindex(range(1, max_m + 1), fill_value=0.0).reset_index(names=['Month'])
-    
-    # Calculate the net interest saved in each month (Base Interest - Scenario Interest)
-    interest_saved_monthly = df_base_padded['Interest'] - df_scenario_padded['Interest']
-    
-    # Calculate NPV of the Interest Savings stream
-    npv_prepay_interest = np.sum([
-        interest_saved_monthly.iloc[t] / ((1 + r_month) ** (t + 1)) 
-        for t in range(len(interest_saved_monthly))
-    ])
-    
-    # 2. Option B: Invest Lump Sums (Benefit = Future Value)
-    
-    # Calculate Future Value (FV) of all contributions over the full horizon
-    inv_final_value = simulate_investment(lump_contributions, 
-                                          monthly_invest=monthly_invest, 
-                                          annual_return_pct=annual_r_invest, 
-                                          months=invest_horizon_months)
-
-    # Calculate Present Value (PV) of the Future Value
-    total_time_to_discount = invest_horizon_months
-    
-    if total_time_to_discount <= 0:
-        npv_invest_value = inv_final_value
-    else:
-        # Discount the Future Value back to Month 0 using the full time span
-        npv_invest_value = inv_final_value / ((1 + r_month) ** total_time_to_discount)
-
-    # Simplified NPV Comparison: PV of Interest Saved vs. PV of Investment FV
-    return npv_prepay_interest, npv_invest_value
-
-# ---------------------------
-# UI: Left columns split into Mortgage / Tax / Investment inputs
-# ---------------------------
-st.set_page_config(page_title="Mortgage vs Invest Planner (2025)", layout="wide", page_icon="🏦")
 left_col, right_col = st.columns([1, 2])
 
 with left_col:
-    st.header("Mortgage inputs")
-    home_price = st.number_input("Home price ($)", value=500000.0, step=1000.0, format="%.2f")
-    down_payment = st.number_input("Down payment ($)", value=100000.0, step=1000.0, format="%.2f")
+    st.markdown("## 🏡 Mortgage & Financial Inputs")
+    home_price = st.number_input("Home price ($)", value=770000.0, step=1000.0, format="%.2f")
+    down_payment = st.number_input("Down payment ($)", value=0.0, step=1000.0, format="%.2f")
     remaining_loan = max(0.0, home_price - down_payment)
-    annual_interest = st.number_input("Annual interest rate (%)", value=6.5, step=0.01, format="%.2f")
+    annual_interest = st.number_input("Annual interest rate (%)", value=5.50, step=0.01, format="%.2f")
     remaining_years = st.number_input("Remaining tenure (years)", value=20, min_value=0, step=1)
     extra_monthly = st.number_input("Extra monthly payment (optional $)", value=0.0, step=50.0, format="%.2f")
-    property_tax_rate = st.number_input("Property tax rate (%)", value=1.0, step=0.01, format="%.2f") / 100.0
-
-    st.markdown("---")
-    st.subheader("Loan Origination Date (for Tax Cap)")
-    col_oy, col_om = st.columns(2)
-    origination_year = col_oy.number_input("Origination Year", value=2018, min_value=1900, max_value=2025, step=1)
-    origination_month = col_om.number_input("Origination Month", value=1, min_value=1, max_value=12, step=1)
-    st.caption("Loans taken on or before Dec 15, 2017, use a $1M cap for interest deduction; post-TCJA loans use $750K.")
+    property_tax_rate = st.number_input("Property tax rate (%)", value=1.50, step=0.01, format="%.2f") / 100.0
     
     st.markdown("---")
-    st.header("Tax inputs (US, 2025)")
-    filing_status = st.selectbox("Filing status (2025)", list(STANDARD_DEDUCTION_2025.keys()), index=3)  # default Married Filing Jointly
+    st.markdown("## 🇺🇸 Tax Inputs (US, 2025 Model)")
+    filing_status = st.selectbox("Filing status (2025)", list(STANDARD_DEDUCTION_2025.keys()), index=3)
     income = st.number_input("Annual gross income ($)", value=150000.0, step=1000.0, format="%.2f")
     num_dependents = st.number_input("Number of dependents (children)", value=0, min_value=0, step=1)
-    include_state = st.checkbox("Include state tax in SALT modeling (approx)", value=False)
-    state_tax_rate = st.number_input("State tax rate (%) (if enabled)", value=5.0, step=0.1, format="%.2f") / 100.0 if include_state else 0.0
+    # Simplified tax logic, removed state tax rate input as it's not crucial for the comparison
     salt_cap = st.number_input("SALT cap ($)", value=10000.0, step=100.0, format="%.2f")
+    
+    st.markdown("---")
+    st.markdown("## 📈 Investment Inputs (Multiple Lumps Supported)")
+    new_lump_amount = st.number_input("New lump amount ($)", value=10000.0, step=100.0, format="%.2f", key="new_lump_amount")
+    new_lump_month = st.number_input("New lump month (1 = now)", value=3, min_value=1, step=1, key="new_lump_month")
+    
+    col_add1, col_add2 = st.columns([1,1])
+    with col_add1:
+        if st.button("Add lump-sum"):
+            st.session_state["lump_events"].append({"amount": float(new_lump_amount), "month": int(new_lump_month)})
+    with col_add2:
+        if st.button("Remove last lump"):
+            if st.session_state["lump_events"]:
+                st.session_state["lump_events"].pop()
+    if st.button("Remove all lumps"):
+        st.session_state["lump_events"] = []
+
+    # Show current lumps
+    st.write("### Current Lump-Sum Events:")
+    if st.session_state["lump_events"]:
+        df_lumps_display = pd.DataFrame(st.session_state["lump_events"])
+        df_lumps_display.index = np.arange(1, len(df_lumps_display) + 1)
+        st.dataframe(df_lumps_display.rename(columns={"amount":"Amount ($)", "month":"Month"}), use_container_width=True)
+    else:
+        st.write("_No lump-sum events added._")
 
     st.markdown("---")
-    st.header("Investment inputs")
     monthly_invest = st.number_input("Monthly invest amount (optional $)", value=0.0, step=10.0, format="%.2f")
-    annual_return = st.number_input("Expected annual return (%)", value=10.0, step=0.1, format="%.2f")  # default 10%
-    invest_horizon_years = st.number_input("Investment horizon (years)", value=remaining_years, min_value=1, step=1)
-    
-    st.subheader("Dynamic Lump Sum Contributions (for Investment Only)")
-
-    # Display current lump sums
-    total_lump_amount = 0
-    if st.session_state.lump_list:
-        st.write("**Current Lump Sums:**")
-        
-        col_list = st.columns([1, 1, 1])
-        
-        for i, (month, amount) in enumerate(st.session_state.lump_list):
-            total_lump_amount += amount
-            
-            # Use the actual 'month' and 'amount' from the session state for the display value
-            col_list[0].text_input(f"Month", value=f"{month}", key=f"month_display_{i}", disabled=True, label_visibility="collapsed")
-            col_list[1].text_input(f"Amount ($)", value=f"{amount:,.2f}", key=f"amount_display_{i}", disabled=True, label_visibility="collapsed")
-            
-            if col_list[2].button("Remove", key=f"remove_lump_{i}"):
-                st.session_state.lump_list.pop(i)
-                st.rerun()
-        
-        st.write(f"**Total Lump Amount:** **{fmt_usd(total_lump_amount)}**")
-    else:
-        st.write("No lump sums currently added.")
-
-    # Input area for adding a new lump sum
-    with st.expander("➕ Add New Lump Sum"):
-        col_new_month, col_new_amount = st.columns(2)
-        new_lump_month = col_new_month.number_input("Month of Contribution (>= 1)", min_value=1, value=12, key="new_lump_month")
-        new_lump_amount = col_new_amount.number_input("Amount ($)", min_value=100.0, value=10000.0, step=100.0, format="%.2f", key="new_lump_amount")
-        
-        def add_lump_contribution():
-            if new_lump_amount > 0 and new_lump_month > 0:
-                st.session_state.lump_list.append((new_lump_month, new_lump_amount))
-                st.session_state.lump_list.sort(key=lambda x: x[0]) # Sort by month
-        
-        if st.button("Add Contribution"):
-            add_lump_contribution()
-            st.rerun()
-
-    # Button to clear all
-    if st.button("🚫 Remove All Lump Sums"):
-        st.session_state.lump_list = []
-        st.rerun()
-
-    # Determine the single lump-sum scenario for the MORTGAGE comparison
-    if st.session_state.lump_list:
-        lump_month_for_mortgage, lump_amount_for_mortgage = st.session_state.lump_list[0]
-    else:
-        lump_month_for_mortgage, lump_amount_for_mortgage = 1, 0.0
+    annual_return = st.number_input("Expected annual return (%)", value=5.0, step=0.1, format="%.2f")
+    invest_horizon_years = st.number_input("Investment horizon (years)", value=10, min_value=1, step=1)
 
 with right_col:
-    st.title("Mortgage — Analysis and Comparison")
-
+    st.title("Mortgage Prepay vs. Invest Analysis")
+    
+    if remaining_loan <= 0 or remaining_years <= 0 or annual_interest <= 0:
+        st.error("Please enter valid positive values for Loan Amount, Rate, and Term.")
+        st.stop()
+    
     months = int(max(1, round(remaining_years * 12)))
+    lumps = st.session_state["lump_events"]
+    
+    # 1. Amortization Schedules
     df_base = amortization_schedule(remaining_loan, annual_interest, months, extra_monthly=0.0)
-    df_extra = amortization_schedule(remaining_loan, annual_interest, months, extra_monthly=extra_monthly if extra_monthly>0 else 0.0)
-    
-    # --- MORTGAGE LUMP SCENARIO using the FIRST entry in the investment list ---
-    lump_amount = lump_amount_for_mortgage 
-    lump_month = lump_month_for_mortgage   
-    
-    df_lump = apply_lump_and_resimulate(df_base, remaining_loan, annual_interest, months, lump_amount, lump_month, extra_monthly=extra_monthly if extra_monthly>0 else 0.0)
+    df_lump = apply_multiple_lumps_and_resimulate(remaining_loan, annual_interest, months, lumps, extra_monthly=extra_monthly)
 
-    # Totals
-    total_interest_base = df_base["Interest"].sum() if not df_base.empty else 0.0
-    total_interest_lump = df_lump["Interest"].sum() if not df_lump.empty else 0.0
-
-    # First-year interest (sum months 1..12)
-    first_year_interest_base = df_base.loc[df_base["Month"] <= 12, "Interest"].sum() if not df_base.empty else 0.0
-    first_year_interest_lump = df_lump.loc[df_lump["Month"] <= 12, "Interest"].sum() if not df_lump.empty else 0.0
+    # 2. Totals & Savings
+    total_interest_base = float(df_base["Interest"].sum()) if not df_base.empty else 0.0
+    total_interest_lump = float(df_lump["Interest"].sum()) if not df_lump.empty else 0.0
+    interest_saved_by_lump = max(0.0, total_interest_base - total_interest_lump)
+    
+    first_year_interest_base = float(df_base.loc[df_base["Month"] <= 12, "Interest"].sum()) if not df_base.empty else 0.0
+    first_year_interest_lump = float(df_lump.loc[df_lump["Month"] <= 12, "Interest"].sum()) if not df_lump.empty else 0.0
 
     months_base = len(df_base)
     months_lump = len(df_lump)
-
     months_saved_by_lump = max(0, months_base - months_lump)
-    interest_saved_by_lump = max(0.0, total_interest_base - total_interest_lump)
 
-    # --- DYNAMIC MORTGAGE DEDUCTION CAP LOGIC ---
-    # The critical date for the cap change is December 15, 2017.
-    if origination_year < 2017 or (origination_year == 2017 and origination_month <= 12): 
-        MORTGAGE_DEDUCTION_CAP = 1000000.0
-        cap_note = "$1,000,000 (pre-TCJA loan)"
-    else:
-        MORTGAGE_DEDUCTION_CAP = 750000.0
-        cap_note = "$750,000 (post-TCJA loan)"
-    # --- END CAP LOGIC ---
-
-    # Tax calculations (annual tax savings from mortgage interest deduction)
+    # 3. Tax Calculations (MID Cap & Savings)
     annual_property_tax = home_price * property_tax_rate
     
-    # For base (original) tax savings
-    tax_savings_base, fed_s_base, st_s_base, interest_deductible_base = compute_annual_tax_savings(
-        first_year_interest_base, income, filing_status, num_dependents, include_state, state_tax_rate, annual_property_tax, remaining_loan, mortgage_cap=MORTGAGE_DEDUCTION_CAP
-    )
-    # For lump scenario, compute tax savings using lump schedule first-year interest
-    tax_savings_lump, fed_s_lump, st_s_lump, interest_deductible_lump = compute_annual_tax_savings(
-        first_year_interest_lump, income, filing_status, num_dependents, include_state, state_tax_rate, annual_property_tax, remaining_loan, mortgage_cap=MORTGAGE_DEDUCTION_CAP
-    )
+    # MID Cap Prorating Logic
+    avg_balance_base = compute_first_year_avg_start_balance(df_base, remaining_loan)
+    avg_balance_lump = compute_first_year_avg_start_balance(df_lump, remaining_loan)
 
-    lost_tax_savings_due_to_lump = max(0.0, tax_savings_base - tax_savings_lump)
+    cap = MID_CAP_DEFAULT
+    cap_factor_base = min(1.0, cap / avg_balance_base) if avg_balance_base > 0 else 1.0
+    cap_factor_lump = min(1.0, cap / avg_balance_lump) if avg_balance_lump > 0 else 1.0
+    cap_applied_base = cap_factor_base < 1.0
+    cap_applied_lump = cap_factor_lump < 1.0
 
-    # Investment simulation & NPV calculation
+    deductible_first_year_interest_base = first_year_interest_base * cap_factor_base
+    deductible_first_year_interest_lump = first_year_interest_lump * cap_factor_lump
+
+    # Annual Tax Savings using Deductible Interest
+    tax_savings_base = compute_annual_tax_savings(deductible_first_year_interest_base, income, filing_status, num_dependents, annual_property_tax, salt_cap)
+    tax_savings_lump = compute_annual_tax_savings(deductible_first_year_interest_lump, income, filing_status, num_dependents, annual_property_tax, salt_cap)
+
+    lost_tax_savings_due_to_lumps = max(0.0, tax_savings_base - tax_savings_lump)
+
+    # 4. Investment FV Simulation
     invest_months = int(invest_horizon_years * 12)
+    annual_return = st.session_state.get("expected_annual_return", annual_return) # Use existing value if available
+    monthly_return = (1 + annual_return / 100.0) ** (1/12.0) - 1.0
+    inv_final_value = simulate_investment_multiple_lumps(lumps, monthly_invest, annual_return, invest_months)
+
+    # 5. NPV Calculations (Core Comparison)
+    max_months = max(len(df_base), len(df_lump))
+    interest_base_series = np.zeros(max_months)
+    interest_lump_series = np.zeros(max_months)
+
+    for idx in range(max_months):
+        m = idx + 1
+        if m <= len(df_base):
+            interest_base_series[idx] = float(df_base.loc[df_base["Month"] == m, "Interest"].values[0])
+        if m <= len(df_lump):
+            interest_lump_series[idx] = float(df_lump.loc[df_lump["Month"] == m, "Interest"].values[0])
+            
+    interest_saved_series = np.maximum(interest_base_series - interest_lump_series, 0.0)
     
-    npv_prepay, npv_invest = calculate_npv(
-        df_base=df_base, 
-        df_scenario=df_lump, 
-        lump_contributions=st.session_state.lump_list,
-        monthly_invest=monthly_invest, 
-        annual_r_invest=annual_return, 
-        invest_horizon_months=invest_months,
-        interest_saved_total=interest_saved_by_lump,
-        tax_savings_annual_base=tax_savings_base,
-        tax_savings_annual_scenario=tax_savings_lump,
-    )
+    # Discount Factors for PV of monthly stream
+    discount_factors = (1 + monthly_return) ** np.arange(1, max_months + 1)
+    npv_mortgage_interest_savings = float(np.sum(interest_saved_series / discount_factors))
 
-    # Also compute effective APR after tax
-    effective_first_year_interest_base = first_year_interest_base - tax_savings_base
-    effective_rate_base_pct = (effective_first_year_interest_base / remaining_loan) * 100.0 if remaining_loan > 0 else 0.0
-
-    effective_first_year_interest_lump = first_year_interest_lump - tax_savings_lump
-    effective_rate_lump_pct = (effective_first_year_interest_lump / remaining_loan) * 100.0 if remaining_loan > 0 else 0.0
+    # PV of lost tax savings: treated as annual amount at end of year 1 (month 12)
+    pv_lost_tax_savings = 0.0
+    if lost_tax_savings_due_to_lumps > 0:
+        pv_lost_tax_savings = lost_tax_savings_due_to_lumps / ((1 + monthly_return) ** 12)
+        
+    # NET MORTGAGE NPV: Interest savings PV minus the value of lost tax breaks
+    npv_mortgage_net = npv_mortgage_interest_savings - pv_lost_tax_savings
+    
+    # PV of investment FV
+    pv_invest = inv_final_value / ((1 + monthly_return) ** invest_months) if invest_months > 0 else inv_final_value
 
     # ---------------------------
-    # Output summary cards
+    # Summary Cards
     # ---------------------------
     st.subheader("Quick Summary")
-
-    s1, s2, s3, s4 = st.columns(4)
-    with s1:
-        st.metric("Base monthly EMI", fmt_usd(compute_emi(remaining_loan, annual_interest, months)))
-        st.write("Loan amount")
-        st.write(fmt_usd(remaining_loan))
-    with s2:
-        st.metric("First-year interest (base)", fmt_usd(first_year_interest_base))
-        st.write("Deductible interest cap")
-        st.write(cap_note)
-    with s3:
-        st.metric("Annual tax savings (base estimate)", fmt_usd(tax_savings_base))
-        st.write("Deduction used")
-        st.write("Itemized" if (interest_deductible_base + min(annual_property_tax, salt_cap)) > STANDARD_DEDUCTION_2025[filing_status] else "Standard")
-    with s4:
-        st.metric("Effective mortgage rate (base, 1st yr)", fmt_pct(effective_rate_base_pct))
-        st.write("Effective (after lump)")
-        st.write(f"{fmt_pct(effective_rate_lump_pct)} (with {fmt_usd(lump_amount)} at month {lump_month})")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Loan Principal", fmt_usd(remaining_loan))
+        st.write("Annual Interest Rate:", fmt_pct(annual_interest))
+    with c2:
+        st.metric("Base EMI", fmt_usd(compute_emi(remaining_loan, annual_interest, months)))
+        st.write("Monthly Property Tax (est.):", fmt_usd(annual_property_tax / 12.0))
+    with c3:
+        st.metric("Total Interest Saved (Nominal)", fmt_usd(interest_saved_by_lump))
+        st.write("Payoff Accelerated:", f"**{months_saved_by_lump} months**")
+    with c4:
+        st.metric("Investment FV (after horizon)", fmt_usd(inv_final_value))
+        st.write("Investment Horizon:", f"**{invest_horizon_years} years**")
 
     st.markdown("---")
 
     # ---------------------------
-    # Investment vs Lump NPV comparison block
+    # Comparison (PV is the key figure)
     # ---------------------------
-    st.subheader("💰 Lump-sum Prepay vs Invest — Net Present Value (NPV) Comparison")
-    st.caption(f"NPV is calculated by discounting future cash flows back to the present using the Expected Annual Return ({fmt_pct(annual_return)}). Higher NPV is better.")
+    st.subheader("🏦 Lump-sum Prepay vs Invest — Net Present Value (NPV) Comparison")
 
-    colA, colB = st.columns(2)
-    with colA:
-        st.markdown("**Option A: Prepay Mortgage**")
-        st.write(f"Interest Saved by Prepaying: **{fmt_usd(interest_saved_by_lump)}**")
-        st.write(f"Payoff accelerated by: **{months_saved_by_lump} months**")
-        st.metric("NPV of Interest Savings (Prepay)", fmt_usd(npv_prepay), delta_color="off")
+    left, right = st.columns(2)
+    with left:
+        st.markdown("### Option A: Prepay Mortgage (Net NPV)")
+        st.write(f"NPV of monthly interest saved: **{fmt_usd(npv_mortgage_interest_savings)}**")
+        st.write(f"PV of lost tax savings (approx): **{fmt_usd(pv_lost_tax_savings)}**")
+        st.markdown(f"**Net Mortgage NPV:** **{fmt_usd(npv_mortgage_net)}**")
 
+    with right:
+        st.markdown("### Option B: Invest Instead")
+        st.write(f"Future Value (FV): **{fmt_usd(inv_final_value)}**")
+        st.write(f"Discount Rate Used (Annual): **{fmt_pct(annual_return)}**")
+        st.markdown(f"**NPV of Investment Future Value:** **{fmt_usd(pv_invest)}**")
 
-    with colB:
-        st.markdown(f"**Option B: Invest for {invest_horizon_years} years**")
-        
-        # Calculate final FV for display using the multi-lump simulation
-        inv_final_value = simulate_investment(st.session_state.lump_list, 
-                                          monthly_invest=monthly_invest, 
-                                          annual_return_pct=annual_return, 
-                                          months=invest_months)
-
-        st.write(f"Future Value after {invest_horizon_years} yrs: **{fmt_usd(inv_final_value)}**")
-        st.metric("NPV of Investment Future Value (Invest)", fmt_usd(npv_invest), delta_color="off")
-
-
-    # --- DETAIL EXPANDER ---
-    with st.expander("📊 See Detailed Financial Breakdown"):
-        r_month = (1 + annual_return / 100.0) ** (1/12.0) - 1.0
-        
-        # Breakdown Column Layout
-        det_col1, det_col2 = st.columns(2)
-        
-        with det_col1:
-            st.markdown("#### Mortgage Prepay Details")
-            st.markdown(f"* **Base Total Interest Paid**: {fmt_usd(total_interest_base)}")
-            st.markdown(f"* **Lump Total Interest Paid**: {fmt_usd(total_interest_lump)}")
-            st.markdown(f"* **Total Interest Saved (Nominal)**: {fmt_usd(interest_saved_by_lump)}")
-            st.markdown(f"* **Lost Annual Tax Savings (1st Yr)**: {fmt_usd(lost_tax_savings_due_to_lump)} (due to reduced interest)")
-            st.markdown(f"* **Mortgage Payoff (Base)**: {months_base} months")
-            st.markdown(f"* **Mortgage Payoff (Lump)**: {months_lump} months")
-
-        with det_col2:
-            st.markdown("#### Investment & Discount Details")
-            st.markdown(f"* **Annual Discount Rate Used (NPV)**: {fmt_pct(annual_return)}")
-            st.markdown(f"* **Monthly Discount Rate Used (NPV)**: {fmt_pct(r_month * 100.0)}")
-            
-            total_invested = total_lump_amount + (monthly_invest * invest_months)
-            st.markdown(f"* **Total Cash Invested (Nominal)**: {fmt_usd(total_invested)}")
-            
-            st.markdown("* **Lump Contributions**:")
-            for month, amount in st.session_state.lump_list:
-                 st.caption(f"  - Month {month}: {fmt_usd(amount)}")
-
-
-    # Recommendation
     st.markdown("---")
-    st.subheader("🎯 Recommendation (Based on NPV)")
-    if npv_invest > npv_prepay:
-        st.success(f"**Investing is mathematically superior** by a Net Present Value of approx {fmt_usd(npv_invest - npv_prepay)}.")
-        st.caption("This assumes the expected investment return is realized and ignores risk.")
-    elif npv_prepay > npv_invest:
-        st.info(f"**Prepaying the mortgage is mathematically superior** by a Net Present Value of approx {fmt_usd(npv_prepay - npv_invest)}.")
-        st.caption("This suggests the guaranteed savings from the loan outweigh the potential returns from investing.")
+    st.subheader("🎯 Recommendation")
+
+    # PV recommendation (apples-to-apples)
+    if pv_invest > npv_mortgage_net:
+        st.success(f"**INVESTING** outperforms prepaying by approx **{fmt_usd(pv_invest - npv_mortgage_net)}** in present value terms.")
     else:
-        st.warning("The NPVs are approximately equal. Other factors (risk tolerance, liquidity needs) should decide.")
-
-    st.markdown("---")
-
-    # ---------------------------
-    # Charts: Balances and Interest comparison
-    # ---------------------------
-    try:
-        max_m = max(len(df_base), len(df_extra), len(df_lump))
-        months_idx = np.arange(1, max_m + 1)
-        df_plot = pd.DataFrame({"Month": months_idx})
-
-        # Balance Data Preparation
-        if not df_base.empty:
-            df_plot = df_plot.merge(df_base[["Month","Balance"]].rename(columns={"Balance":"Balance_Base"}), on="Month", how="left")
-        else:
-            df_plot["Balance_Base"] = 0.0
-
-        if not df_extra.empty:
-            df_plot = df_plot.merge(df_extra[["Month","Balance"]].rename(columns={"Balance":"Balance_Extra"}), on="Month", how="left")
-        else:
-            df_plot["Balance_Extra"] = 0.0
-
-        if not df_lump.empty:
-            df_plot = df_plot.merge(df_lump[["Month","Balance"]].rename(columns={"Balance":"Balance_Lump"}), on="Month", how="left")
-        else:
-            df_plot["Balance_Lump"] = 0.0
-
-        df_plot["Balance_Base"].ffill(inplace=True); df_plot["Balance_Base"].fillna(0,inplace=True)
-        df_plot["Balance_Extra"].ffill(inplace=True); df_plot["Balance_Extra"].fillna(0,inplace=True)
-        df_plot["Balance_Lump"].ffill(inplace=True); df_plot["Balance_Lump"].fillna(0,inplace=True)
-
-        # 1. Balance Comparison Chart
-        st.subheader("Outstanding Balance Over Time")
-        melt = df_plot.melt("Month", value_vars=["Balance_Base","Balance_Extra","Balance_Lump"], var_name="Scenario", value_name="Balance")
-        melt["Scenario"] = melt["Scenario"].map({"Balance_Base":"Base","Balance_Extra":"With Extra","Balance_Lump":"With Lump"})
-
-        chart_balance = alt.Chart(melt).mark_line().encode(
-            x="Month",
-            y=alt.Y("Balance", title="Outstanding Balance ($)"),
-            color="Scenario"
-        ).properties(height=420)
-        st.altair_chart(chart_balance, use_container_width=True)
+        st.info(f"**PREPAYING** outperforms investing by approx **{fmt_usd(npv_mortgage_net - pv_invest)}** in present value terms.")
         
-
-        # 2. Cumulative Interest Chart
-        st.subheader("Cumulative Interest Paid")
-
-        # Interest Data Preparation
-        df_plot["Interest_Base"] = df_base["Interest"].cumsum() if not df_base.empty else 0.0
-        df_plot["Interest_Extra"] = df_extra["Interest"].cumsum() if not df_extra.empty else 0.0
-        df_plot["Interest_Lump"] = df_lump["Interest"].cumsum() if not df_lump.empty else 0.0
-        
-        # Fill NA values for shorter amortization schedules after payoff
-        df_plot["Interest_Base"].ffill(inplace=True); df_plot["Interest_Base"].fillna(0,inplace=True)
-        df_plot["Interest_Extra"].ffill(inplace=True); df_plot["Interest_Extra"].fillna(0,inplace=True)
-        df_plot["Interest_Lump"].ffill(inplace=True); df_plot["Interest_Lump"].fillna(0,inplace=True)
-        
-        melt_interest = df_plot.melt("Month", value_vars=["Interest_Base","Interest_Extra","Interest_Lump"], var_name="Scenario", value_name="Cumulative_Interest")
-        melt_interest["Scenario"] = melt_interest["Scenario"].map({"Interest_Base":"Base","Interest_Extra":"With Extra","Interest_Lump":"With Lump"})
-
-        chart_interest = alt.Chart(melt_interest).mark_line().encode(
-            x="Month",
-            y=alt.Y("Cumulative_Interest", title="Cumulative Interest Paid ($)"),
-            color="Scenario"
-        ).properties(height=420)
-        st.altair_chart(chart_interest, use_container_width=True)
-        
-
-    except Exception:
-        st.info("Ensure all dependencies (pandas, streamlit, numpy, altair, openpyxl) are installed to render charts.")
-
     st.markdown("---")
-
+    
     # ---------------------------
-    # Amortization tables & downloads (Rest of the file remains the same)
+    # Detailed Tax Info
     # ---------------------------
-    st.subheader("Amortization Schedules & Downloads")
-    t1, t2, t3 = st.tabs(["Base schedule","With extra monthly","With lump"])
+    st.subheader("Tax Details (First Year Estimates) 🧾")
+    st.write(f"Filing status: **{filing_status}** | Annual income: **{fmt_usd(income)}**")
+    
+    tax_col1, tax_col2 = st.columns(2)
+    with tax_col1:
+        st.markdown("**Base Mortgage Scenario**")
+        st.write(f"First-Year Interest: **{fmt_usd(first_year_interest_base)}**")
+        if cap_applied_base:
+            st.write(f"*MID Cap ($\${int(MID_CAP_DEFAULT):,}$) applied.* Deductible Interest Used: **{fmt_usd(deductible_first_year_interest_base)}**")
+        st.write(f"Annual Tax Savings (Est.): **{fmt_usd(tax_savings_base)}**")
 
-    with t1:
-        if df_base.empty:
-            st.write("No schedule")
-        else:
-            st.dataframe(df_base, use_container_width=True)
-            st.download_button("Download base CSV", df_base.to_csv(index=False), "amortization_base.csv", "text/csv")
-            st.download_button("Download base Excel", to_excel_bytes(df_base, "Base"), "amortization_base.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    with t2:
-        if df_extra.empty:
-            st.write("No schedule")
-        else:
-            st.dataframe(df_extra, use_container_width=True)
-            st.download_button("Download extra CSV", df_extra.to_csv(index=False), "amortization_extra.csv", "text/csv")
-            st.download_button("Download extra Excel", to_excel_bytes(df_extra, "Extra"), "amortization_extra.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    with t3:
-        if df_lump.empty:
-            st.write("No schedule")
-        else:
-            st.dataframe(df_lump, use_container_width=True)
-            st.download_button("Download lump CSV", df_lump.to_csv(index=False), "amortization_lump.csv", "text/csv")
-            st.download_button("Download lump Excel", to_excel_bytes(df_lump, "Lump"), "amortization_lump.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    st.markdown("---")
-
-    # ---------------------------
-    # Yearly summary (base)
-    # ---------------------------
-    def yearly_summary(df):
-        if df.empty:
-            return pd.DataFrame()
-        df2 = df.copy()
-        df2["Year"] = ((df2["Month"] - 1) // 12) + 1
-        agg = df2.groupby("Year").agg({
-            "Interest":"sum","PrincipalBase":"sum","ExtraPayment":"sum","TotalPayment":"sum","Balance":"last"
-        }).reset_index()
-        return agg
-
-    st.subheader("Yearly summary (Base)")
-    ys = yearly_summary(df_base)
-    if ys.empty:
-        st.write("No data")
-    else:
-        st.dataframe(ys, use_container_width=True)
-        st.download_button("Download yearly CSV", ys.to_csv(index=False), "yearly_summary.csv", "text/csv")
-
-    st.markdown("---")
-
-    # ---------------------------
-    # Tax details
-    # ---------------------------
-    st.subheader("Tax details (estimates) — 2025")
-    st.write(f"Filing status: **{filing_status}**")
-    st.write(f"Annual income: **{fmt_usd(income)}**")
-    st.write(f"First-year mortgage interest (base): **{fmt_usd(first_year_interest_base)}**")
-    st.write(f"Deductible interest (base, capped): **{fmt_usd(interest_deductible_base)}**")
-    st.write(f"Estimated annual tax savings (base): **{fmt_usd(tax_savings_base)}**")
-    st.write(f"Estimated annual tax savings (with lump): **{fmt_usd(tax_savings_lump)}**")
-    st.write(f"Estimated lost tax savings due to prepaying: **{fmt_usd(lost_tax_savings_due_to_lump)}**")
-    st.caption("Notes: Tax benefit is based on the deductible interest which is capped based on your loan origination date. For precise tax planning consult a tax professional.")
+    with tax_col2:
+        st.markdown("**Prepay Scenario**")
+        st.write(f"First-Year Interest: **{fmt_usd(first_year_interest_lump)}**")
+        if cap_applied_lump:
+            st.write(f"*MID Cap ($\${int(MID_CAP_DEFAULT):,}$) applied.* Deductible Interest Used: **{fmt_usd(deductible_first_year_interest_lump)}**")
+        st.write(f"Annual Tax Savings (Est.): **{fmt_usd(tax_savings_lump)}**")
+        st.write(f"**Lost Tax Savings by Prepaying (Nominal):** **{fmt_usd(lost_tax_savings_due_to_lumps)}**")
+    
+    st.caption("Tax estimates use 2025 federal brackets and rules, including the $10,000 SALT cap and the $750,000 Mortgage Interest Deduction (MID) cap. Consult a tax professional.")
