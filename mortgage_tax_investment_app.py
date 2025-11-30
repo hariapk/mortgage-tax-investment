@@ -393,7 +393,8 @@ with left_col:
         # Display as a table/list
         for i, (month, amount) in enumerate(st.session_state.lump_list):
             total_lump_amount += amount
-            # Displaying contributions in a cleaner format
+            
+            # Correction: Use the actual 'month' and 'amount' from the session state for the display value
             col_list[0].text_input(f"Month", value=f"{month}", key=f"month_display_{i}", disabled=True, label_visibility="collapsed")
             col_list[1].text_input(f"Amount ($)", value=f"{amount:,.2f}", key=f"amount_display_{i}", disabled=True, label_visibility="collapsed")
             
