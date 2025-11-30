@@ -1,4 +1,4 @@
-# mortgage_tax_investment_app.py (Full code with corrected NPV logic and input check)
+# mortgage_tax_investment_app.py (Full code with CORRECTED NPV Investment Timing)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -280,9 +280,9 @@ def compute_annual_tax_savings(first_year_interest, income, filing_status, num_d
     return total, federal_savings, state_savings
 
 # ---------------------------
-# NPV CALCULATION FUNCTION (FIXED)
+# NPV CALCULATION FUNCTION (FIXED FOR INVESTMENT TIMING)
 # ---------------------------
-def calculate_npv(df_base, df_scenario, lump_amount, monthly_invest, annual_r_invest, invest_horizon_months, interest_saved_total, tax_savings_annual_base, tax_savings_annual_scenario, months_lump):
+def calculate_npv(df_base, df_scenario, lump_amount, monthly_invest, annual_r_invest, invest_horizon_months, interest_saved_total, tax_savings_annual_base, tax_savings_annual_scenario, lump_month):
     """
     Compares the NPV of the Lump Payment (Prepay) vs. Lump Investment (Invest) option.
     Discount Rate (r) used is the monthly investment return rate.
@@ -296,8 +296,6 @@ def calculate_npv(df_base, df_scenario, lump_amount, monthly_invest, annual_r_in
     
     # 1. Option A: Prepay Mortgage (Benefit = Interest Saved)
     max_m = max(len(df_base), len(df_scenario))
-    
-    # FIX for ValueError: Set 'Month' as index first, then reindex and reset to avoid duplicate column error.
     
     # Prepare base DataFrame
     df_base_indexed = df_base.set_index('Month')
@@ -318,12 +316,36 @@ def calculate_npv(df_base, df_scenario, lump_amount, monthly_invest, annual_r_in
     ])
     
     # 2. Option B: Invest Lump Sum (Benefit = Future Value)
-    inv_final_value = simulate_investment(lump_amount, monthly_invest=monthly_invest, annual_return_pct=annual_r_invest, months=invest_horizon_months)
     
-    # Calculate PV of the Investment Future Value (This is the PV of the final asset value)
-    # The error was not in the math, but likely in the input being used. 
-    # This calculation is mathematically correct: PV = FV / (1+r)^T
-    npv_invest_value = inv_final_value / ((1 + r_month) ** invest_horizon_months)
+    # The lump sum is considered available today (Month 0). If it is not used until lump_month, 
+    # that is the delay before the investment begins.
+    
+    # Delay: Months the money is held as cash (lump_month=1 means 0 delay)
+    delay_months = max(0, lump_month - 1)
+    
+    # Compounding Period: The investment only compounds for the remaining time in the horizon.
+    compounding_months = max(0, invest_horizon_months - delay_months)
+
+    # 2a. Calculate Future Value (FV) of the delayed investment
+    if compounding_months <= 0:
+        # If compounding period is zero or negative, the final value is the lump sum amount.
+        inv_final_value = lump_amount
+    else:
+        # Simulate lump sum and monthly investments compounding for the shortened period
+        inv_final_value = simulate_investment(lump_amount, 
+                                              monthly_invest=monthly_invest, 
+                                              annual_return_pct=annual_r_invest, 
+                                              months=compounding_months)
+
+    # 2b. Calculate Present Value (PV) of the Future Value
+    # The FV is realized at the end of the total time span: delay_months + compounding_months
+    total_time_to_discount = delay_months + compounding_months
+    
+    if total_time_to_discount <= 0:
+        npv_invest_value = inv_final_value # NPV is just the FV if time=0
+    else:
+        # Discount the Future Value back to Month 0 using the full time span
+        npv_invest_value = inv_final_value / ((1 + r_month) ** total_time_to_discount)
 
     # Simplified NPV Comparison: PV of Interest Saved vs. PV of Investment FV
     return npv_prepay_interest, npv_invest_value
@@ -410,7 +432,7 @@ with right_col:
         interest_saved_total=interest_saved_by_lump,
         tax_savings_annual_base=tax_savings_base,
         tax_savings_annual_scenario=tax_savings_lump,
-        months_lump=months_lump
+        lump_month=lump_month
     )
 
 
@@ -461,7 +483,15 @@ with right_col:
 
     with colB:
         st.markdown(f"**Option B: Invest for {invest_horizon_years} years**")
-        inv_final_value = simulate_investment(lump_amount, monthly_invest=monthly_invest, annual_return_pct=annual_return, months=invest_months)
+        
+        # Recalculate FV here for display consistency (it's already calculated internally for NPV)
+        delay_months = max(0, lump_month - 1)
+        compounding_months = max(0, invest_months - delay_months)
+        if compounding_months <= 0:
+            inv_final_value = lump_amount
+        else:
+            inv_final_value = simulate_investment(lump_amount, monthly_invest=monthly_invest, annual_return_pct=annual_return, months=compounding_months)
+
         st.write(f"Future Value after {invest_horizon_years} yrs: **{fmt_usd(inv_final_value)}**")
         st.metric("NPV of Investment Future Value (Invest)", fmt_usd(npv_invest), delta_color="off")
 
@@ -520,6 +550,7 @@ with right_col:
         ).properties(height=420)
         st.altair_chart(chart_balance, use_container_width=True)
         
+
         # 2. Cumulative Interest Chart
         st.subheader("Cumulative Interest Paid")
 
@@ -543,6 +574,7 @@ with right_col:
         ).properties(height=420)
         st.altair_chart(chart_interest, use_container_width=True)
         
+
     except Exception:
         st.info("Ensure all dependencies (pandas, streamlit, numpy, altair, openpyxl) are installed to render charts.")
 
@@ -613,5 +645,5 @@ with right_col:
     st.write(f"First-year mortgage interest (with lump): **{fmt_usd(first_year_interest_lump)}**")
     st.write(f"Estimated annual tax savings (base): **{fmt_usd(tax_savings_base)}**")
     st.write(f"Estimated annual tax savings (with lump): **{fmt_usd(tax_savings_lump)}**")
-    st.write(f"Estimated lost tax savings by prepaying: **{fmt_usd(lost_tax_savings_due_to_lump)}**")
+    st.write(f"Estimated lost tax savings due to prepaying: **{fmt_usd(lost_tax_savings_due_to_lump)}**")
     st.caption("Notes: Child tax credit modeled as $2,000 per dependent (simplified). SALT cap applied. For precise tax planning consult a tax professional.")
