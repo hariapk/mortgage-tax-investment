@@ -1,4 +1,4 @@
-# mortgage_tax_investment_app.py (Full code with MULTIPLE LUMPS and NPV DETAILS)
+# mortgage_tax_investment_app.py (Full code with Dynamic Mortgage Interest Cap)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -260,32 +260,48 @@ def simulate_investment(lump_contributions, monthly_invest=0.0, annual_return_pc
     return balance
 
 # ---------------------------
-# Tax savings calculator (uses first-year interest as deduction proxy)
+# Tax savings calculator (uses first-year interest as deduction proxy) - UPDATED FOR DYNAMIC CAP
 # ---------------------------
-def compute_annual_tax_savings(first_year_interest, income, filing_status, num_dependents, include_state, state_tax_rate, annual_property_tax, salt_cap=10000.0):
+def compute_annual_tax_savings(first_year_interest, income, filing_status, num_dependents, include_state, state_tax_rate, annual_property_tax, remaining_loan_principal, salt_cap=10000.0, mortgage_cap=750000.0):
     """
     Returns:
       annual_tax_savings (float),
-      breakdown: (federal_savings, state_savings)
-    Approach:
-      - itemized = first_year_interest + min(annual_property_tax, salt_cap)
-      - compare federal tax liability under standard deduction vs itemized
+      federal_savings,
+      state_savings,
+      interest_deductible (capped)
+    
+    Includes TCJA (post-2017) mortgage interest deduction cap logic.
     """
+    
+    # 1. Apply Mortgage Interest Deduction Cap
+    if remaining_loan_principal > 0:
+        # Ratio of the cap to the current loan principal, limited to 1.0
+        cap_ratio = min(1.0, mortgage_cap / remaining_loan_principal)
+        interest_deductible = first_year_interest * cap_ratio
+    else:
+        interest_deductible = 0.0
+
     std = STANDARD_DEDUCTION_2025.get(filing_status, 0.0)
     salt = min(annual_property_tax, salt_cap)
-    itemized = first_year_interest + salt
+    
+    # 2. Calculate Itemized Deduction: Capped Interest + Capped SALT
+    itemized = interest_deductible + salt
+    
     # taxable incomes
     taxable_standard = max(0.0, income - std)
     taxable_itemized = max(0.0, income - itemized)
+    
     # federal taxes
     tax_standard = compute_progressive_tax(taxable_standard, filing_status)
     tax_itemized = compute_progressive_tax(taxable_itemized, filing_status)
+    
     # child credit
     CHILD_TAX_CREDIT = 2000.0
     credit = num_dependents * CHILD_TAX_CREDIT
     tax_after_standard = max(0.0, tax_standard - credit)
     tax_after_itemized = max(0.0, tax_itemized - credit)
     federal_savings = tax_after_standard - tax_after_itemized
+    
     # state approximate: assume state tax savings from deduction is: (itemized - std) * state_tax_rate
     state_savings = 0.0
     if include_state:
@@ -294,14 +310,13 @@ def compute_annual_tax_savings(first_year_interest, income, filing_status, num_d
         state_savings = state_deduction_benefit * state_tax_rate
     
     total = max(0.0, federal_savings + state_savings)
-    return total, federal_savings, state_savings
+    return total, federal_savings, state_savings, interest_deductible
 
 # ---------------------------
-# NPV CALCULATION FUNCTION (REVISED FOR MULTIPLE LUMPS AND TIME)
+# NPV CALCULATION FUNCTION 
 # ---------------------------
 def calculate_npv(df_base, df_scenario, lump_contributions, monthly_invest, annual_r_invest, invest_horizon_months, interest_saved_total, tax_savings_annual_base, tax_savings_annual_scenario):
     """
-    lump_contributions is now a list of (month, amount) tuples.
     NPV_A: Present value of total interest saved (discounted at investment rate)
     NPV_B: Present value of investment future value (PV of final wealth)
     """
@@ -366,6 +381,13 @@ with left_col:
     property_tax_rate = st.number_input("Property tax rate (%)", value=1.0, step=0.01, format="%.2f") / 100.0
 
     st.markdown("---")
+    st.subheader("Loan Origination Date (for Tax Cap)")
+    col_oy, col_om = st.columns(2)
+    origination_year = col_oy.number_input("Origination Year", value=2018, min_value=1900, max_value=2025, step=1)
+    origination_month = col_om.number_input("Origination Month", value=1, min_value=1, max_value=12, step=1)
+    st.caption("Loans taken on or before Dec 15, 2017, use a $1M cap for interest deduction; post-TCJA loans use $750K.")
+    
+    st.markdown("---")
     st.header("Tax inputs (US, 2025)")
     filing_status = st.selectbox("Filing status (2025)", list(STANDARD_DEDUCTION_2025.keys()), index=3)  # default Married Filing Jointly
     income = st.number_input("Annual gross income ($)", value=150000.0, step=1000.0, format="%.2f")
@@ -387,18 +409,15 @@ with left_col:
     if st.session_state.lump_list:
         st.write("**Current Lump Sums:**")
         
-        # Determine the width of the columns based on the number of inputs
         col_list = st.columns([1, 1, 1])
         
-        # Display as a table/list
         for i, (month, amount) in enumerate(st.session_state.lump_list):
             total_lump_amount += amount
             
-            # Correction: Use the actual 'month' and 'amount' from the session state for the display value
+            # Use the actual 'month' and 'amount' from the session state for the display value
             col_list[0].text_input(f"Month", value=f"{month}", key=f"month_display_{i}", disabled=True, label_visibility="collapsed")
             col_list[1].text_input(f"Amount ($)", value=f"{amount:,.2f}", key=f"amount_display_{i}", disabled=True, label_visibility="collapsed")
             
-            # Add a removal button for each entry
             if col_list[2].button("Remove", key=f"remove_lump_{i}"):
                 st.session_state.lump_list.pop(i)
                 st.rerun()
@@ -429,19 +448,15 @@ with left_col:
 
     # Determine the single lump-sum scenario for the MORTGAGE comparison
     if st.session_state.lump_list:
-        # We use the FIRST entry as the single lump payment for the mortgage scenario
         lump_month_for_mortgage, lump_amount_for_mortgage = st.session_state.lump_list[0]
     else:
-        # If no entries, set the lump payment to zero to simulate "no lump payment"
         lump_month_for_mortgage, lump_amount_for_mortgage = 1, 0.0
 
 with right_col:
     st.title("Mortgage — Analysis and Comparison")
 
     months = int(max(1, round(remaining_years * 12)))
-    # Base schedule (no extra, no lump)
     df_base = amortization_schedule(remaining_loan, annual_interest, months, extra_monthly=0.0)
-    # With extra monthly payments
     df_extra = amortization_schedule(remaining_loan, annual_interest, months, extra_monthly=extra_monthly if extra_monthly>0 else 0.0)
     
     # --- MORTGAGE LUMP SCENARIO using the FIRST entry in the investment list ---
@@ -464,19 +479,33 @@ with right_col:
     months_saved_by_lump = max(0, months_base - months_lump)
     interest_saved_by_lump = max(0.0, total_interest_base - total_interest_lump)
 
+    # --- DYNAMIC MORTGAGE DEDUCTION CAP LOGIC ---
+    # The critical date for the cap change is December 15, 2017.
+    if origination_year < 2017 or (origination_year == 2017 and origination_month <= 12): 
+        MORTGAGE_DEDUCTION_CAP = 1000000.0
+        cap_note = "$1,000,000 (pre-TCJA loan)"
+    else:
+        MORTGAGE_DEDUCTION_CAP = 750000.0
+        cap_note = "$750,000 (post-TCJA loan)"
+    # --- END CAP LOGIC ---
+
     # Tax calculations (annual tax savings from mortgage interest deduction)
     annual_property_tax = home_price * property_tax_rate
+    
     # For base (original) tax savings
-    tax_savings_base, fed_s_base, st_s_base = compute_annual_tax_savings(first_year_interest_base, income, filing_status, num_dependents, include_state, state_tax_rate, annual_property_tax, salt_cap)
+    tax_savings_base, fed_s_base, st_s_base, interest_deductible_base = compute_annual_tax_savings(
+        first_year_interest_base, income, filing_status, num_dependents, include_state, state_tax_rate, annual_property_tax, remaining_loan, mortgage_cap=MORTGAGE_DEDUCTION_CAP
+    )
     # For lump scenario, compute tax savings using lump schedule first-year interest
-    tax_savings_lump, fed_s_lump, st_s_lump = compute_annual_tax_savings(first_year_interest_lump, income, filing_status, num_dependents, include_state, state_tax_rate, annual_property_tax, salt_cap)
+    tax_savings_lump, fed_s_lump, st_s_lump, interest_deductible_lump = compute_annual_tax_savings(
+        first_year_interest_lump, income, filing_status, num_dependents, include_state, state_tax_rate, annual_property_tax, remaining_loan, mortgage_cap=MORTGAGE_DEDUCTION_CAP
+    )
 
     lost_tax_savings_due_to_lump = max(0.0, tax_savings_base - tax_savings_lump)
 
     # Investment simulation & NPV calculation
     invest_months = int(invest_horizon_years * 12)
     
-    # Calculate NPVs, passing the *full list* of lump contributions for the investment option
     npv_prepay, npv_invest = calculate_npv(
         df_base=df_base, 
         df_scenario=df_lump, 
@@ -508,12 +537,12 @@ with right_col:
         st.write(fmt_usd(remaining_loan))
     with s2:
         st.metric("First-year interest (base)", fmt_usd(first_year_interest_base))
-        st.write("Annual property tax (est.)")
-        st.write(fmt_usd(annual_property_tax))
+        st.write("Deductible interest cap")
+        st.write(cap_note)
     with s3:
         st.metric("Annual tax savings (base estimate)", fmt_usd(tax_savings_base))
         st.write("Deduction used")
-        st.write("Itemized" if (first_year_interest_base + min(annual_property_tax, salt_cap)) > STANDARD_DEDUCTION_2025[filing_status] else "Standard")
+        st.write("Itemized" if (interest_deductible_base + min(annual_property_tax, salt_cap)) > STANDARD_DEDUCTION_2025[filing_status] else "Standard")
     with s4:
         st.metric("Effective mortgage rate (base, 1st yr)", fmt_pct(effective_rate_base_pct))
         st.write("Effective (after lump)")
@@ -548,7 +577,7 @@ with right_col:
         st.metric("NPV of Investment Future Value (Invest)", fmt_usd(npv_invest), delta_color="off")
 
 
-    # --- NEW DETAIL EXPANDER (as requested) ---
+    # --- DETAIL EXPANDER ---
     with st.expander("📊 See Detailed Financial Breakdown"):
         r_month = (1 + annual_return / 100.0) ** (1/12.0) - 1.0
         
@@ -572,7 +601,6 @@ with right_col:
             total_invested = total_lump_amount + (monthly_invest * invest_months)
             st.markdown(f"* **Total Cash Invested (Nominal)**: {fmt_usd(total_invested)}")
             
-            # Show the individual lumps for context
             st.markdown("* **Lump Contributions**:")
             for month, amount in st.session_state.lump_list:
                  st.caption(f"  - Month {month}: {fmt_usd(amount)}")
@@ -724,8 +752,8 @@ with right_col:
     st.write(f"Filing status: **{filing_status}**")
     st.write(f"Annual income: **{fmt_usd(income)}**")
     st.write(f"First-year mortgage interest (base): **{fmt_usd(first_year_interest_base)}**")
-    st.write(f"First-year mortgage interest (with lump): **{fmt_usd(first_year_interest_lump)}**")
+    st.write(f"Deductible interest (base, capped): **{fmt_usd(interest_deductible_base)}**")
     st.write(f"Estimated annual tax savings (base): **{fmt_usd(tax_savings_base)}**")
     st.write(f"Estimated annual tax savings (with lump): **{fmt_usd(tax_savings_lump)}**")
     st.write(f"Estimated lost tax savings due to prepaying: **{fmt_usd(lost_tax_savings_due_to_lump)}**")
-    st.caption("Notes: Child tax credit modeled as $2,000 per dependent (simplified). SALT cap applied. For precise tax planning consult a tax professional.")
+    st.caption("Notes: Tax benefit is based on the deductible interest which is capped based on your loan origination date. For precise tax planning consult a tax professional.")
