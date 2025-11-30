@@ -1,10 +1,15 @@
-# mortgage_tax_investment_app.py (Full code with CORRECTED NPV Investment Timing)
+# mortgage_tax_investment_app.py (Full code with CORRECTED NPV Investment Timing and MULTIPLE LUMPS)
 import streamlit as st
 import pandas as pd
 import numpy as np
 from io import BytesIO
 import math
 import altair as alt
+
+# Initialize session state for dynamic lump sums
+if 'lump_list' not in st.session_state:
+    # Default to a single lump sum setting (e.g., $20,000 on month 12)
+    st.session_state.lump_list = [(12, 20000.0)] 
 
 # ---------------------------
 # Formatting helpers
@@ -224,22 +229,34 @@ def apply_lump_and_resimulate(original_schedule_df, P, annual_rate_pct, n_months
     return df_new
 
 # ---------------------------
-# Investment simulation (monthly compounding)
+# Investment simulation (monthly compounding) - REVISED FOR MULTIPLE LUMPS
 # ---------------------------
-def simulate_investment(lump_amount, monthly_invest=0.0, annual_return_pct=10.0, months=12):
+def simulate_investment(lump_contributions, monthly_invest=0.0, annual_return_pct=10.0, months=12):
     """
-    Simulate starting lump_amount invested at month 0, plus monthly_invest deposits at the END of each month.
-    monthly compounding used: monthly_return = (1+annual_return)^(1/12)-1
+    Simulate starting investment (zero unless a lump is at month 1), plus monthly_invest deposits at the END of each month.
+    lump_contributions is a list of tuples: [(month, amount), ...].
+    Monthly compounding used: monthly_return = (1+annual_return)^(1/12)-1
     Return final balance after 'months'.
     """
     r_month = (1 + annual_return_pct/100.0) ** (1/12.0) - 1.0
-    balance = float(lump_amount)
-    for m in range(1, months+1):
-        # grow existing balance
+    balance = 0.0
+    
+    # Convert list of tuples to a dictionary for faster lookup {month: amount}
+    lump_dict = dict(lump_contributions)
+    
+    # Simulation runs from the start of month 1 up to the end of month 'months'
+    for m in range(1, months + 1):
+        # 1. Apply any lump sum (at the START of the month, immediately before compounding)
+        if m in lump_dict:
+            balance += lump_dict[m]
+            
+        # 2. Grow existing balance by compounding
         balance = balance * (1 + r_month)
-        # then add monthly contribution at month end
+        
+        # 3. Add monthly contribution (at the END of the month)
         if monthly_invest > 0:
             balance += monthly_invest
+            
     return balance
 
 # ---------------------------
@@ -280,13 +297,11 @@ def compute_annual_tax_savings(first_year_interest, income, filing_status, num_d
     return total, federal_savings, state_savings
 
 # ---------------------------
-# NPV CALCULATION FUNCTION (FIXED FOR INVESTMENT TIMING)
+# NPV CALCULATION FUNCTION (REVISED FOR MULTIPLE LUMPS AND TIME)
 # ---------------------------
-def calculate_npv(df_base, df_scenario, lump_amount, monthly_invest, annual_r_invest, invest_horizon_months, interest_saved_total, tax_savings_annual_base, tax_savings_annual_scenario, lump_month):
+def calculate_npv(df_base, df_scenario, lump_contributions, monthly_invest, annual_r_invest, invest_horizon_months, interest_saved_total, tax_savings_annual_base, tax_savings_annual_scenario):
     """
-    Compares the NPV of the Lump Payment (Prepay) vs. Lump Investment (Invest) option.
-    Discount Rate (r) used is the monthly investment return rate.
-
+    lump_contributions is now a list of (month, amount) tuples.
     NPV_A: Present value of total interest saved (discounted at investment rate)
     NPV_B: Present value of investment future value (PV of final wealth)
     """
@@ -309,40 +324,24 @@ def calculate_npv(df_base, df_scenario, lump_amount, monthly_invest, annual_r_in
     interest_saved_monthly = df_base_padded['Interest'] - df_scenario_padded['Interest']
     
     # Calculate NPV of the Interest Savings stream
-    # Note: We use t+1 for discounting factor since the savings are realized *after* each month/payment.
     npv_prepay_interest = np.sum([
         interest_saved_monthly.iloc[t] / ((1 + r_month) ** (t + 1)) 
         for t in range(len(interest_saved_monthly))
     ])
     
-    # 2. Option B: Invest Lump Sum (Benefit = Future Value)
+    # 2. Option B: Invest Lump Sums (Benefit = Future Value)
     
-    # The lump sum is considered available today (Month 0). If it is not used until lump_month, 
-    # that is the delay before the investment begins.
-    
-    # Delay: Months the money is held as cash (lump_month=1 means 0 delay)
-    delay_months = max(0, lump_month - 1)
-    
-    # Compounding Period: The investment only compounds for the remaining time in the horizon.
-    compounding_months = max(0, invest_horizon_months - delay_months)
+    # Calculate Future Value (FV) of all contributions over the full horizon
+    inv_final_value = simulate_investment(lump_contributions, 
+                                          monthly_invest=monthly_invest, 
+                                          annual_return_pct=annual_r_invest, 
+                                          months=invest_horizon_months)
 
-    # 2a. Calculate Future Value (FV) of the delayed investment
-    if compounding_months <= 0:
-        # If compounding period is zero or negative, the final value is the lump sum amount.
-        inv_final_value = lump_amount
-    else:
-        # Simulate lump sum and monthly investments compounding for the shortened period
-        inv_final_value = simulate_investment(lump_amount, 
-                                              monthly_invest=monthly_invest, 
-                                              annual_return_pct=annual_r_invest, 
-                                              months=compounding_months)
-
-    # 2b. Calculate Present Value (PV) of the Future Value
-    # The FV is realized at the end of the total time span: delay_months + compounding_months
-    total_time_to_discount = delay_months + compounding_months
+    # Calculate Present Value (PV) of the Future Value
+    total_time_to_discount = invest_horizon_months
     
     if total_time_to_discount <= 0:
-        npv_invest_value = inv_final_value # NPV is just the FV if time=0
+        npv_invest_value = inv_final_value
     else:
         # Discount the Future Value back to Month 0 using the full time span
         npv_invest_value = inv_final_value / ((1 + r_month) ** total_time_to_discount)
@@ -377,12 +376,63 @@ with left_col:
 
     st.markdown("---")
     st.header("Investment inputs")
-    # DEFAULT IS 20000.0
-    lump_amount = st.number_input("Lump-sum amount ($)", value=20000.0, step=100.0, format="%.2f")
-    lump_month = st.number_input("Lump-sum month (1 = now)", value=12, min_value=1, step=1)
     monthly_invest = st.number_input("Monthly invest amount (optional $)", value=0.0, step=10.0, format="%.2f")
     annual_return = st.number_input("Expected annual return (%)", value=10.0, step=0.1, format="%.2f")  # default 10%
     invest_horizon_years = st.number_input("Investment horizon (years)", value=remaining_years, min_value=1, step=1)
+    
+    st.subheader("Dynamic Lump Sum Contributions (for Investment Only)")
+
+    # Display current lump sums
+    total_lump_amount = 0
+    if st.session_state.lump_list:
+        st.write("**Current Lump Sums:**")
+        
+        # Determine the width of the columns based on the number of inputs
+        col_list = st.columns([1, 1, 1])
+        
+        # Display as a table/list
+        for i, (month, amount) in enumerate(st.session_state.lump_list):
+            total_lump_amount += amount
+            # Displaying contributions in a cleaner format
+            col_list[0].text_input(f"Month", value=f"{month}", key=f"month_display_{i}", disabled=True, label_visibility="collapsed")
+            col_list[1].text_input(f"Amount ($)", value=f"{amount:,.2f}", key=f"amount_display_{i}", disabled=True, label_visibility="collapsed")
+            
+            # Add a removal button for each entry
+            if col_list[2].button("Remove", key=f"remove_lump_{i}"):
+                st.session_state.lump_list.pop(i)
+                st.rerun()
+        
+        st.write(f"**Total Lump Amount:** **{fmt_usd(total_lump_amount)}**")
+    else:
+        st.write("No lump sums currently added.")
+
+    # Input area for adding a new lump sum
+    with st.expander("➕ Add New Lump Sum"):
+        col_new_month, col_new_amount = st.columns(2)
+        new_lump_month = col_new_month.number_input("Month of Contribution (>= 1)", min_value=1, value=12, key="new_lump_month")
+        new_lump_amount = col_new_amount.number_input("Amount ($)", min_value=100.0, value=10000.0, step=100.0, format="%.2f", key="new_lump_amount")
+        
+        def add_lump_contribution():
+            if new_lump_amount > 0 and new_lump_month > 0:
+                st.session_state.lump_list.append((new_lump_month, new_lump_amount))
+                st.session_state.lump_list.sort(key=lambda x: x[0]) # Sort by month
+        
+        if st.button("Add Contribution"):
+            add_lump_contribution()
+            st.rerun()
+
+    # Button to clear all
+    if st.button("🚫 Remove All Lump Sums"):
+        st.session_state.lump_list = []
+        st.rerun()
+
+    # Determine the single lump-sum scenario for the MORTGAGE comparison
+    if st.session_state.lump_list:
+        # We use the FIRST entry as the single lump payment for the mortgage scenario
+        lump_month_for_mortgage, lump_amount_for_mortgage = st.session_state.lump_list[0]
+    else:
+        # If no entries, set the lump payment to zero to simulate "no lump payment"
+        lump_month_for_mortgage, lump_amount_for_mortgage = 1, 0.0
 
 with right_col:
     st.title("Mortgage — Analysis and Comparison")
@@ -392,7 +442,11 @@ with right_col:
     df_base = amortization_schedule(remaining_loan, annual_interest, months, extra_monthly=0.0)
     # With extra monthly payments
     df_extra = amortization_schedule(remaining_loan, annual_interest, months, extra_monthly=extra_monthly if extra_monthly>0 else 0.0)
-    # Lump-sum schedule
+    
+    # --- MORTGAGE LUMP SCENARIO using the FIRST entry in the investment list ---
+    lump_amount = lump_amount_for_mortgage 
+    lump_month = lump_month_for_mortgage   
+    
     df_lump = apply_lump_and_resimulate(df_base, remaining_loan, annual_interest, months, lump_amount, lump_month, extra_monthly=extra_monthly if extra_monthly>0 else 0.0)
 
     # Totals
@@ -421,20 +475,18 @@ with right_col:
     # Investment simulation & NPV calculation
     invest_months = int(invest_horizon_years * 12)
     
-    # Calculate NPVs
+    # Calculate NPVs, passing the *full list* of lump contributions for the investment option
     npv_prepay, npv_invest = calculate_npv(
         df_base=df_base, 
         df_scenario=df_lump, 
-        lump_amount=lump_amount, 
+        lump_contributions=st.session_state.lump_list,
         monthly_invest=monthly_invest, 
         annual_r_invest=annual_return, 
         invest_horizon_months=invest_months,
         interest_saved_total=interest_saved_by_lump,
         tax_savings_annual_base=tax_savings_base,
         tax_savings_annual_scenario=tax_savings_lump,
-        lump_month=lump_month
     )
-
 
     # Also compute effective APR after tax
     effective_first_year_interest_base = first_year_interest_base - tax_savings_base
@@ -463,7 +515,8 @@ with right_col:
         st.write("Itemized" if (first_year_interest_base + min(annual_property_tax, salt_cap)) > STANDARD_DEDUCTION_2025[filing_status] else "Standard")
     with s4:
         st.metric("Effective mortgage rate (base, 1st yr)", fmt_pct(effective_rate_base_pct))
-        st.write("Effective (after lump)", f"{fmt_pct(effective_rate_lump_pct)} (after lump)")
+        st.write("Effective (after lump)")
+        st.write(f"{fmt_pct(effective_rate_lump_pct)} (with {fmt_usd(lump_amount)} at month {lump_month})")
 
     st.markdown("---")
 
@@ -484,13 +537,11 @@ with right_col:
     with colB:
         st.markdown(f"**Option B: Invest for {invest_horizon_years} years**")
         
-        # Recalculate FV here for display consistency (it's already calculated internally for NPV)
-        delay_months = max(0, lump_month - 1)
-        compounding_months = max(0, invest_months - delay_months)
-        if compounding_months <= 0:
-            inv_final_value = lump_amount
-        else:
-            inv_final_value = simulate_investment(lump_amount, monthly_invest=monthly_invest, annual_return_pct=annual_return, months=compounding_months)
+        # Calculate final FV for display using the multi-lump simulation
+        inv_final_value = simulate_investment(st.session_state.lump_list, 
+                                          monthly_invest=monthly_invest, 
+                                          annual_return_pct=annual_return, 
+                                          months=invest_months)
 
         st.write(f"Future Value after {invest_horizon_years} yrs: **{fmt_usd(inv_final_value)}**")
         st.metric("NPV of Investment Future Value (Invest)", fmt_usd(npv_invest), delta_color="off")
