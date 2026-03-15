@@ -438,11 +438,11 @@ st.markdown(f"""
 
 # ── Quick-summary metrics (native st.metric + CSS) ────────
 m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("Monthly EMI (P&I)",       fmt_usd(emi_base),          f"Loan: {fmt_usd(remaining_loan)}")
-m2.metric("Monthly PITI",            fmt_usd(monthly_piti),      f"Tax: {fmt_usd(monthly_tax)} · Ins: {fmt_usd(monthly_insurance)}")
-m3.metric("1st-Year Interest",       fmt_usd(first_yr_int_base), f"Prop. tax: {fmt_usd(annual_property_tax)}")
-m4.metric("Annual Tax Savings",      fmt_usd(tax_sav_base),      f"{'Itemized' if uses_itemized else 'Standard'} deduction")
-m5.metric("Effective Rate (yr 1)",   fmt_pct(eff_rate_base),     "After tax savings")
+m1.metric("Monthly EMI (P&I)",       fmt_usd(emi_base))
+m2.metric("Monthly PITI",            fmt_usd(monthly_piti))
+m3.metric("1st-Year Interest",       fmt_usd(first_yr_int_base))
+m4.metric("Annual Tax Savings",      fmt_usd(tax_sav_base))
+m5.metric("Effective Rate (yr 1)",   fmt_pct(eff_rate_base))
 
 st.markdown("---")
 
