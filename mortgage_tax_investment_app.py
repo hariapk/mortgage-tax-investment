@@ -358,8 +358,9 @@ with st.sidebar:
     st.caption(f"Loan amount: **{fmt_usd(remaining_loan)}**")
     annual_interest = st.number_input("Annual interest rate (%)",  value=6.5,      step=0.01,    format="%.2f")
     remaining_years = st.number_input("Tenure (years)",            value=20,       min_value=0,  step=1)
-    extra_monthly   = st.number_input("Extra monthly payment ($)", value=0.0,      step=50.0,    format="%.2f")
-    property_tax_rt = st.number_input("Property tax rate (%)",     value=1.0,      step=0.01,    format="%.2f") / 100.0
+    extra_monthly      = st.number_input("Extra monthly payment ($)", value=0.0,     step=50.0,   format="%.2f")
+    annual_property_tax = st.number_input("Annual property tax ($)",  value=5000.0, step=100.0,  format="%.2f")
+    annual_insurance    = st.number_input("Annual home insurance ($)", value=1500.0, step=100.0,  format="%.2f")
 
     st.markdown('<p class="sb-hdr">Tax (US 2025)</p>', unsafe_allow_html=True)
     filing_status   = st.selectbox("Filing status", list(STANDARD_DEDUCTION_2025.keys()), index=3)
@@ -396,7 +397,6 @@ months_base, months_lump = len(df_base), len(df_lump)
 months_saved          = max(0, months_base - months_lump)
 interest_saved        = max(0.0, total_interest_base - total_interest_lump)
 
-annual_property_tax   = home_price * property_tax_rt
 tax_sav_base,  fed_s_base, st_s_base = compute_annual_tax_savings(
     first_yr_int_base, income, filing_status, num_dependents, include_state, state_tax_rate, annual_property_tax, salt_cap)
 tax_sav_lump,  fed_s_lump, st_s_lump = compute_annual_tax_savings(
@@ -408,7 +408,10 @@ npv_prepay, npv_invest = calculate_npv(
     df_base, df_lump, lump_amount, monthly_invest, annual_return,
     invest_months, interest_saved, tax_sav_base, tax_sav_lump, lump_month)
 
-emi_base = compute_emi(remaining_loan, annual_interest, months)
+emi_base          = compute_emi(remaining_loan, annual_interest, months)
+monthly_tax       = annual_property_tax / 12.0
+monthly_insurance = annual_insurance / 12.0
+monthly_piti      = emi_base + monthly_tax + monthly_insurance
 eff_int_base  = first_yr_int_base - tax_sav_base
 eff_rate_base = (eff_int_base / remaining_loan * 100.0) if remaining_loan > 0 else 0.0
 
@@ -434,11 +437,12 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ── Quick-summary metrics (native st.metric + CSS) ────────
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Monthly EMI",             fmt_usd(emi_base),          f"Loan: {fmt_usd(remaining_loan)}")
-m2.metric("1st-Year Interest",       fmt_usd(first_yr_int_base), f"Prop. tax: {fmt_usd(annual_property_tax)}")
-m3.metric("Annual Tax Savings",      fmt_usd(tax_sav_base),      f"{'Itemized' if uses_itemized else 'Standard'} deduction")
-m4.metric("Effective Rate (yr 1)",   fmt_pct(eff_rate_base),     "After tax savings")
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("Monthly EMI (P&I)",       fmt_usd(emi_base),          f"Loan: {fmt_usd(remaining_loan)}")
+m2.metric("Monthly PITI",            fmt_usd(monthly_piti),      f"Tax: {fmt_usd(monthly_tax)} · Ins: {fmt_usd(monthly_insurance)}")
+m3.metric("1st-Year Interest",       fmt_usd(first_yr_int_base), f"Prop. tax: {fmt_usd(annual_property_tax)}")
+m4.metric("Annual Tax Savings",      fmt_usd(tax_sav_base),      f"{'Itemized' if uses_itemized else 'Standard'} deduction")
+m5.metric("Effective Rate (yr 1)",   fmt_pct(eff_rate_base),     "After tax savings")
 
 st.markdown("---")
 
@@ -554,9 +558,14 @@ for tab, df_tab, label in [(t1, df_base, "base"), (t2, df_extra, "extra"), (t3, 
         if df_tab.empty:
             st.info("No schedule generated.")
         else:
-            st.dataframe(df_tab.style.format({
+            df_display = df_tab.copy()
+            df_display["MonthlyTax"]       = round(monthly_tax, 2)
+            df_display["MonthlyInsurance"] = round(monthly_insurance, 2)
+            df_display["TotalPITI"]        = round(df_display["TotalPayment"] + monthly_tax + monthly_insurance, 2)
+            st.dataframe(df_display.style.format({
                 "BaseEMI":"${:,.2f}", "Interest":"${:,.2f}", "PrincipalBase":"${:,.2f}",
-                "ExtraPayment":"${:,.2f}", "TotalPayment":"${:,.2f}", "Balance":"${:,.2f}"
+                "ExtraPayment":"${:,.2f}", "TotalPayment":"${:,.2f}", "Balance":"${:,.2f}",
+                "MonthlyTax":"${:,.2f}", "MonthlyInsurance":"${:,.2f}", "TotalPITI":"${:,.2f}"
             }), use_container_width=True, height=320)
             bc1, bc2 = st.columns(2)
             with bc1:
